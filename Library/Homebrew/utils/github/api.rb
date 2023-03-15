@@ -1,10 +1,22 @@
-# typed: false
+# typed: true
 # frozen_string_literal: true
 
 require "tempfile"
 require "utils/shell"
+require "utils/formatter"
 
+# A module that interfaces with GitHub, code like PAT scopes, credential handling and API errors.
 module GitHub
+  def self.pat_blurb(scopes = ALL_SCOPES)
+    <<~EOS
+      Create a GitHub personal access token:
+      #{Formatter.url(
+        "https://github.com/settings/tokens/new?scopes=#{scopes.join(",")}&description=Homebrew",
+      )}
+      #{Utils::Shell.set_variable_in_profile("HOMEBREW_GITHUB_API_TOKEN", "your_token_here")}
+    EOS
+  end
+
   API_URL = "https://api.github.com"
   API_MAX_PAGES = 50
   API_MAX_ITEMS = 5000
@@ -13,14 +25,6 @@ module GitHub
   CREATE_ISSUE_FORK_OR_PR_SCOPES = ["repo"].freeze
   CREATE_WORKFLOW_SCOPES = ["workflow"].freeze
   ALL_SCOPES = (CREATE_GIST_SCOPES + CREATE_ISSUE_FORK_OR_PR_SCOPES + CREATE_WORKFLOW_SCOPES).freeze
-  ALL_SCOPES_URL = Formatter.url(
-    "https://github.com/settings/tokens/new?scopes=#{ALL_SCOPES.join(",")}&description=Homebrew",
-  ).freeze
-  CREATE_GITHUB_PAT_MESSAGE = <<~EOS
-    Create a GitHub personal access token:
-        #{ALL_SCOPES_URL}
-      #{Utils::Shell.set_variable_in_profile("HOMEBREW_GITHUB_API_TOKEN", "your_token_here")}
-  EOS
   GITHUB_PERSONAL_ACCESS_TOKEN_REGEX = /^(?:[a-f0-9]{40}|gh[po]_\w{36,251})$/.freeze
 
   # Helper functions to access the GitHub API.
@@ -48,7 +52,7 @@ module GitHub
     class RateLimitExceededError < Error
       def initialize(reset, github_message)
         @github_message = github_message
-        new_pat_message = ", or:\n#{CREATE_GITHUB_PAT_MESSAGE}" if API.credentials.blank?
+        new_pat_message = ", or:\n#{GitHub.pat_blurb}" if API.credentials.blank?
         super <<~EOS
           GitHub API Error: #{github_message}
           Try again in #{pretty_ratelimit_reset(reset)}#{new_pat_message}
@@ -75,7 +79,7 @@ module GitHub
             The GitHub credentials in the macOS keychain may be invalid.
             Clear them with:
               printf "protocol=https\\nhost=github.com\\n" | git credential-osxkeychain erase
-            #{CREATE_GITHUB_PAT_MESSAGE}
+            #{GitHub.pat_blurb}
           EOS
         end
         super message.freeze
@@ -86,7 +90,7 @@ module GitHub
     class MissingAuthenticationError < Error
       def initialize
         message = +"No GitHub credentials found in macOS Keychain or environment.\n"
-        message << CREATE_GITHUB_PAT_MESSAGE
+        message << GitHub.pat_blurb
         super message
       end
     end
@@ -176,7 +180,7 @@ module GitHub
         Your #{what} credentials do not have sufficient scope!
         Scopes required: #{needed_scopes}
         Scopes present:  #{credentials_scopes}
-        #{CREATE_GITHUB_PAT_MESSAGE}
+        #{GitHub.pat_blurb}
       EOS
     end
 
@@ -184,11 +188,14 @@ module GitHub
       # This is a no-op if the user is opting out of using the GitHub API.
       return block_given? ? yield({}) : {} if Homebrew::EnvConfig.no_github_api?
 
-      args = ["--header", "Accept: application/vnd.github.v3+json", "--write-out", "\n%\{http_code}"]
-      args += ["--header", "Accept: application/vnd.github.antiope-preview+json"]
+      # This is a Curl format token, not a Ruby one.
+      # rubocop:disable Style/FormatStringToken
+      args = ["--header", "Accept: application/vnd.github+json", "--write-out", "\n%{http_code}"]
+      # rubocop:enable Style/FormatStringToken
 
       token = credentials
       args += ["--header", "Authorization: token #{token}"] unless credentials_type == :none
+      args += ["--header", "X-GitHub-Api-Version:2022-11-28"]
 
       data_tmpfile = nil
       if data
@@ -207,7 +214,7 @@ module GitHub
 
       headers_tmpfile = Tempfile.new("github_api_headers", HOMEBREW_TEMP)
       begin
-        if data
+        if data_tmpfile
           data_tmpfile.write data
           data_tmpfile.close
           args += ["--data", "@#{data_tmpfile.path}"]
@@ -215,7 +222,7 @@ module GitHub
           args += ["--request", request_method.to_s] if request_method
         end
 
-        args += ["--dump-header", headers_tmpfile.path]
+        args += ["--dump-header", T.must(headers_tmpfile.path)]
 
         output, errors, status = curl_output("--location", url.to_s, *args, secrets: [token])
         output, _, http_code = output.rpartition("\n")
@@ -246,24 +253,28 @@ module GitHub
       end
     end
 
-    def paginate_rest(url, per_page: 100)
+    def paginate_rest(url, additional_query_params: nil, per_page: 100)
       (1..API_MAX_PAGES).each do |page|
-        result = API.open_rest("#{url}?per_page=#{per_page}&page=#{page}")
+        result = API.open_rest("#{url}?per_page=#{per_page}&page=#{page}&#{additional_query_params}")
+        break if result.blank?
+
         yield(result, page)
       end
     end
 
-    def open_graphql(query, variables: nil, scopes: [].freeze)
+    def open_graphql(query, variables: nil, scopes: [].freeze, raise_errors: true)
       data = { query: query, variables: variables }
       result = open_rest("#{API_URL}/graphql", scopes: scopes, data: data, request_method: "POST")
 
-      if result["errors"].present?
-        raise Error, result["errors"].map { |e|
-                       "#{e["type"]}: #{e["message"]}"
-                     }.join("\n")
-      end
+      if raise_errors
+        if result["errors"].present?
+          raise Error, result["errors"].map { |e| "#{e["type"]}: #{e["message"]}" }.join("\n")
+        end
 
-      result["data"]
+        result["data"]
+      else
+        result
+      end
     end
 
     def raise_error(output, errors, http_code, headers, scopes)

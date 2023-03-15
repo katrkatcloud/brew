@@ -2,7 +2,6 @@
 # frozen_string_literal: true
 
 require "open3"
-require "ostruct"
 require "plist"
 require "shellwords"
 
@@ -24,12 +23,12 @@ class SystemCommand
   module Mixin
     extend T::Sig
 
-    def system_command(*args)
-      T.unsafe(SystemCommand).run(*args)
+    def system_command(executable, **options)
+      SystemCommand.run(executable, **options)
     end
 
-    def system_command!(*args)
-      T.unsafe(SystemCommand).run!(*args)
+    def system_command!(command, **options)
+      SystemCommand.run!(command, **options)
     end
   end
 
@@ -37,11 +36,11 @@ class SystemCommand
   extend Predicable
 
   def self.run(executable, **options)
-    T.unsafe(self).new(executable, **options).run!
+    new(executable, **options).run!
   end
 
   def self.run!(command, **options)
-    T.unsafe(self).run(command, **options, must_succeed: true)
+    run(command, **options, must_succeed: true)
   end
 
   sig { returns(SystemCommand::Result) }
@@ -121,7 +120,7 @@ class SystemCommand
 
   sig { returns(T::Array[String]) }
   def command
-    [*sudo_prefix, *env_args, executable.to_s, *expanded_args]
+    [*command_prefix, executable.to_s, *expanded_args]
   end
 
   private
@@ -154,15 +153,23 @@ class SystemCommand
 
     return [] if set_variables.empty?
 
-    ["/usr/bin/env", *set_variables]
+    set_variables
   end
 
   sig { returns(T::Array[String]) }
   def sudo_prefix
-    return [] unless sudo?
-
     askpass_flags = ENV.key?("SUDO_ASKPASS") ? ["-A"] : []
-    ["/usr/bin/sudo", *askpass_flags, "-E", "--"]
+    ["/usr/bin/sudo", *askpass_flags, "-E", *env_args, "--"]
+  end
+
+  sig { returns(T::Array[String]) }
+  def env_prefix
+    ["/usr/bin/env", *env_args]
+  end
+
+  sig { returns(T::Array[String]) }
+  def command_prefix
+    sudo? ? sudo_prefix : env_prefix
   end
 
   sig { returns(T::Array[String]) }
@@ -349,7 +356,7 @@ class SystemCommand
           Regexp.last_match(1)
         end
 
-        Plist.parse_xml(output)
+        Plist.parse_xml(output, marshal: false)
       end
     end
 

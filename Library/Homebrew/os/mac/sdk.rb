@@ -42,9 +42,9 @@ module OS
 
       class NoSDKError < StandardError; end
 
-      sig { params(v: OS::Mac::Version).returns(SDK) }
-      def sdk_for(v)
-        sdk = all_sdks.find { |s| s.version == v }
+      sig { params(version: OS::Mac::Version).returns(SDK) }
+      def sdk_for(version)
+        sdk = all_sdks.find { |s| s.version == version }
         raise NoSDKError if sdk.nil?
 
         sdk
@@ -59,6 +59,8 @@ module OS
         # Bail out if there is no SDK prefix at all
         return @all_sdks unless File.directory? sdk_prefix
 
+        found_versions = Set.new
+
         Dir["#{sdk_prefix}/MacOSX*.sdk"].each do |sdk_path|
           next unless sdk_path.match?(SDK::VERSIONED_SDK_REGEX)
 
@@ -66,26 +68,25 @@ module OS
           next if version.nil?
 
           @all_sdks << SDK.new(version, sdk_path, source)
+          found_versions << version
         end
 
-        # Fall back onto unversioned SDK if we've not found a suitable SDK
-        if @all_sdks.empty?
-          sdk_path = Pathname.new("#{sdk_prefix}/MacOSX.sdk")
-          if (version = read_sdk_version(sdk_path))
-            @all_sdks << SDK.new(version, sdk_path, source)
-          end
+        # Use unversioned SDK only if we don't have one matching that version.
+        sdk_path = Pathname.new("#{sdk_prefix}/MacOSX.sdk")
+        if (version = read_sdk_version(sdk_path)) && found_versions.exclude?(version)
+          @all_sdks << SDK.new(version, sdk_path, source)
         end
 
         @all_sdks
       end
 
-      sig { params(v: T.nilable(OS::Mac::Version)).returns(T.nilable(SDK)) }
-      def sdk_if_applicable(v = nil)
+      sig { params(version: T.nilable(OS::Mac::Version)).returns(T.nilable(SDK)) }
+      def sdk_if_applicable(version = nil)
         sdk = begin
-          if v.blank?
+          if version.blank?
             sdk_for OS::Mac.version
           else
-            sdk_for v
+            sdk_for version
           end
         rescue NoSDKError
           latest_sdk
@@ -94,7 +95,7 @@ module OS
 
         # On OSs lower than 11, whenever the major versions don't match,
         # only return an SDK older than the OS version if it was specifically requested
-        return if v.blank? && sdk.version < OS::Mac.version
+        return if version.blank? && sdk.version < OS::Mac.version
 
         sdk
       end

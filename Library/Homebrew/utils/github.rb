@@ -30,8 +30,18 @@ module GitHub
     API.open_rest(url_to("repos", repo, "check-runs"), data: data)
   end
 
+  def issues(repo:, **filters)
+    uri = url_to("repos", repo, "issues")
+    uri.query = URI.encode_www_form(filters)
+    API.open_rest(uri)
+  end
+
   def search_issues(query, **qualifiers)
-    search("issues", query, **qualifiers)
+    search_results_items("issues", query, **qualifiers)
+  end
+
+  def count_issues(query, **qualifiers)
+    search_results_count("issues", query, **qualifiers)
   end
 
   def create_gist(files, description, private:)
@@ -51,14 +61,7 @@ module GitHub
   end
 
   def search_code(repo: nil, user: "Homebrew", path: ["Formula", "Casks", "."], filename: nil, extension: "rb")
-    matches = search("code", user: user, path: path, filename: filename, extension: extension, repo: repo)
-    return matches if matches.blank?
-
-    matches.map do |match|
-      # .sub workaround for GitHub returning preceding /
-      match["path"] = match["path"].delete_prefix("/")
-      match
-    end
+    search_results_items("code", user: user, path: path, filename: filename, extension: extension, repo: repo)
   end
 
   def issues_for_formula(name, tap: CoreTap.instance, tap_remote_repo: tap&.full_name, state: nil)
@@ -130,7 +133,7 @@ module GitHub
     API.open_rest(url, data: data, scopes: scopes)
   end
 
-  def check_fork_exists(repo, org: nil)
+  def fork_exists?(repo, org: nil)
     _, reponame = repo.split("/")
 
     username = org || API.open_rest(url_to("user")) { |json| json["login"] }
@@ -153,14 +156,24 @@ module GitHub
     API.open_rest(uri) { |json| json["private"] }
   end
 
-  def query_string(*main_params, **qualifiers)
+  def search_query_string(*main_params, **qualifiers)
     params = main_params
 
-    params += qualifiers.flat_map do |key, value|
-      Array(value).map { |v| "#{key}:#{v}" }
+    if (args = qualifiers.fetch(:args, nil))
+      params << if args.from && args.to
+        "created:#{args.from}..#{args.to}"
+      elsif args.from
+        "created:>=#{args.from}"
+      elsif args.to
+        "created:<=#{args.to}"
+      end
     end
 
-    "q=#{URI.encode_www_form_component(params.join(" "))}&per_page=100"
+    params += qualifiers.except(:args).flat_map do |key, value|
+      Array(value).map { |v| "#{key.to_s.tr("_", "-")}:#{v}" }
+    end
+
+    "q=#{URI.encode_www_form_component(params.compact.join(" "))}&per_page=100"
   end
 
   def url_to(*subroutes)
@@ -169,8 +182,18 @@ module GitHub
 
   def search(entity, *queries, **qualifiers)
     uri = url_to "search", entity
-    uri.query = query_string(*queries, **qualifiers)
-    API.open_rest(uri) { |json| json.fetch("items", []) }
+    uri.query = search_query_string(*queries, **qualifiers)
+    API.open_rest(uri)
+  end
+
+  def search_results_items(entity, *queries, **qualifiers)
+    json = search(entity, *queries, **qualifiers)
+    json.fetch("items", [])
+  end
+
+  def search_results_count(entity, *queries, **qualifiers)
+    json = search(entity, *queries, **qualifiers)
+    json.fetch("total_count", 0)
   end
 
   def approved_reviews(user, repo, pr, commit: nil)
@@ -331,15 +354,15 @@ module GitHub
       EOS
     end
 
-    status = check_suite.first["status"].sub("_", " ").downcase
+    status = check_suite.last["status"].sub("_", " ").downcase
     if status != "completed"
       raise API::Error, <<~EOS
         The newest workflow run for ##{pr} is still #{status}!
-          #{Formatter.url check_suite.first["workflowRun"]["url"]}
+          #{Formatter.url check_suite.last["workflowRun"]["url"]}
       EOS
     end
 
-    run_id = check_suite.first["workflowRun"]["databaseId"]
+    run_id = check_suite.last["workflowRun"]["databaseId"]
     artifacts = API.open_rest("#{API_URL}/repos/#{user}/#{repo}/actions/runs/#{run_id}/artifacts", scopes: scopes)
 
     artifact = artifacts["artifacts"].select do |art|
@@ -349,11 +372,11 @@ module GitHub
     if artifact.empty?
       raise API::Error, <<~EOS
         No artifact with the name `#{artifact_name}` was found!
-          #{Formatter.url check_suite.first["workflowRun"]["url"]}
+          #{Formatter.url check_suite.last["workflowRun"]["url"]}
       EOS
     end
 
-    artifact.first["archive_download_url"]
+    artifact.last["archive_download_url"]
   end
 
   def public_member_usernames(org, per_page: 100)
@@ -397,59 +420,78 @@ module GitHub
     result["organization"]["team"]["members"]["nodes"].to_h { |member| [member["login"], member["name"]] }
   end
 
-  def sponsors_by_tier(user)
-    query = <<~EOS
-        { organization(login: "#{user}") {
-          sponsorsListing {
-            tiers(first: 10, orderBy: {field: MONTHLY_PRICE_IN_CENTS, direction: DESC}) {
+  def sponsorships(user)
+    has_next_page = true
+    after = ""
+    sponsorships = []
+    errors = []
+    while has_next_page
+      query = <<~EOS
+          { organization(login: "#{user}") {
+            sponsorshipsAsMaintainer(first: 100 #{after}) {
+              pageInfo {
+                startCursor
+                hasNextPage
+                endCursor
+              }
+              totalCount
               nodes {
-                monthlyPriceInDollars
-                adminInfo {
-                  sponsorships(first: 100, includePrivate: true) {
-                    totalCount
-                    nodes {
-                      privacyLevel
-                      sponsorEntity {
-                        __typename
-                        ... on Organization { login name }
-                        ... on User { login name }
-                      }
-                    }
+                tier {
+                  monthlyPriceInDollars
+                  closestLesserValueTier {
+                    monthlyPriceInDollars
                   }
+                }
+                sponsorEntity {
+                  __typename
+                  ... on Organization { login name }
+                  ... on User { login name }
                 }
               }
             }
           }
         }
-      }
-    EOS
-    result = API.open_graphql(query, scopes: ["admin:org", "user"])
+      EOS
+      # Some organisations do not permit themselves to be queried through the
+      # API like this and raise an error so handle these errors later.
+      # This has been reported to GitHub.
+      result = API.open_graphql(query, scopes: ["user"], raise_errors: false)
+      errors += result["errors"] if result["errors"].present?
 
-    tiers = result["organization"]["sponsorsListing"]["tiers"]["nodes"]
+      current_sponsorships = result["data"]["organization"]["sponsorshipsAsMaintainer"]
 
-    tiers.map do |t|
-      tier = t["monthlyPriceInDollars"]
-      raise API::Error, "Your token needs the 'admin:org' scope to access this API" if t["adminInfo"].nil?
+      # The organisations mentioned above will show up as nil nodes.
+      if (nodes = current_sponsorships["nodes"].compact.presence)
+        sponsorships += nodes
+      end
 
-      sponsorships = t["adminInfo"]["sponsorships"]
-      count = sponsorships["totalCount"]
-      sponsors = sponsorships["nodes"].map do |sponsor|
-        next unless sponsor["privacyLevel"] == "PUBLIC"
+      if (page_info = current_sponsorships["pageInfo"].presence) &&
+         page_info["hasNextPage"].presence
+        after = %Q(, after: "#{page_info["endCursor"]}")
+      else
+        has_next_page = false
+      end
+    end
 
-        se = sponsor["sponsorEntity"]
-        {
-          "name"  => se["name"].presence || sponsor["login"],
-          "login" => se["login"],
-          "type"  => se["__typename"].downcase,
-        }
-      end.compact
+    # Only raise errors if we didn't get any sponsorships.
+    if sponsorships.blank? && errors.present?
+      raise API::Error, errors.map { |e| "#{e["type"]}: #{e["message"]}" }.join("\n")
+    end
+
+    sponsorships.map do |sponsorship|
+      sponsor = sponsorship["sponsorEntity"]
+      tier = sponsorship["tier"].presence || {}
+      monthly_amount = tier["monthlyPriceInDollars"].presence || 0
+      closest_tier = tier["closestLesserValueTier"].presence || {}
+      closest_tier_monthly_amount = closest_tier["monthlyPriceInDollars"].presence || 0
 
       {
-        "tier"     => tier,
-        "count"    => count,
-        "sponsors" => sponsors,
+        name:                        sponsor["name"].presence || sponsor["login"],
+        login:                       sponsor["login"],
+        monthly_amount:              monthly_amount,
+        closest_tier_monthly_amount: closest_tier_monthly_amount,
       }
-    end.compact
+    end
   end
 
   def get_repo_license(user, repo)
@@ -463,10 +505,10 @@ module GitHub
 
   def fetch_pull_requests(name, tap_remote_repo, state: nil, version: nil)
     if version.present?
-      query = "#{name} #{version}"
+      query = "#{name} #{version} is:pr"
       regex = /(^|\s)#{Regexp.quote(name)}(:|,|\s)(.*\s)?#{Regexp.quote(version)}(:|,|\s|$)/i
     else
-      query = name
+      query = "#{name} is:pr"
       regex = /(^|\s)#{Regexp.quote(name)}(:|,|\s|$)/i
     end
     issues_for_formula(query, tap_remote_repo: tap_remote_repo, state: state).select do |pr|
@@ -479,13 +521,14 @@ module GitHub
 
   def check_for_duplicate_pull_requests(name, tap_remote_repo, state:, file:, args:, version: nil)
     pull_requests = fetch_pull_requests(name, tap_remote_repo, state: state, version: version).select do |pr|
-      pr_files = API.open_rest(url_to("repos", tap_remote_repo, "pulls", pr["number"], "files"))
-      pr_files.any? { |f| f["filename"] == file }
+      get_pull_request_changed_files(
+        tap_remote_repo, pr["number"]
+      ).any? { |f| f["filename"] == file }
     end
     return if pull_requests.blank?
 
     duplicates_message = <<~EOS
-      These pull requests may be duplicates:
+      These #{state} pull requests may be duplicates:
       #{pull_requests.map { |pr| "#{pr["title"]} #{pr["html_url"]}" }.join("\n")}
     EOS
     error_message = "Duplicate PRs should not be opened. Use --force to override this error."
@@ -501,11 +544,15 @@ module GitHub
     end
   end
 
+  def get_pull_request_changed_files(tap_remote_repo, pr)
+    API.open_rest(url_to("repos", tap_remote_repo, "pulls", pr, "files"))
+  end
+
   def forked_repo_info!(tap_remote_repo, org: nil)
     response = create_fork(tap_remote_repo, org: org)
     # GitHub API responds immediately but fork takes a few seconds to be ready.
-    sleep 1 until check_fork_exists(tap_remote_repo, org: org)
-    remote_url = if system("git", "config", "--local", "--get-regexp", "remote\..*\.url", "git@github.com:.*")
+    sleep 1 until fork_exists?(tap_remote_repo, org: org)
+    remote_url = if system("git", "config", "--local", "--get-regexp", "remote..*.url", "git@github.com:.*")
       response.fetch("ssh_url")
     else
       url = response.fetch("clone_url")
@@ -549,8 +596,8 @@ module GitHub
         ohai "git fetch --unshallow origin" if shallow
         ohai "git add #{changed_files.join(" ")}"
         ohai "git checkout --no-track -b #{branch} #{remote}/#{remote_branch}"
-        ohai "git commit --no-edit --verbose --message='#{commit_message}'" \
-             " -- #{changed_files.join(" ")}"
+        ohai "git commit --no-edit --verbose --message='#{commit_message}' " \
+             "-- #{changed_files.join(" ")}"
         ohai "git push --set-upstream #{remote_url} #{branch}:#{branch}"
         ohai "git checkout --quiet #{previous_branch}"
         ohai "create pull request with GitHub API (base branch: #{remote_branch})"
@@ -635,5 +682,65 @@ module GitHub
   def pull_request_labels(user, repo, pr)
     pr_data = API.open_rest(url_to("repos", user, repo, "pulls", pr))
     pr_data["labels"].map { |label| label["name"] }
+  end
+
+  def last_commit(user, repo, ref)
+    return if Homebrew::EnvConfig.no_github_api?
+
+    output, _, status = curl_output(
+      "--silent", "--head", "--location",
+      "--header", "Accept: application/vnd.github.sha",
+      url_to("repos", user, repo, "commits", ref).to_s
+    )
+
+    return unless status.success?
+
+    commit = output[/^ETag: "(\h+)"/, 1]
+    return if commit.blank?
+
+    version.update_commit(commit)
+    commit
+  end
+
+  def multiple_short_commits_exist?(user, repo, commit)
+    return if Homebrew::EnvConfig.no_github_api?
+
+    output, _, status = curl_output(
+      "--silent", "--head", "--location",
+      "--header", "Accept: application/vnd.github.sha",
+      url_to("repos", user, repo, "commits", commit).to_s
+    )
+
+    return true unless status.success?
+    return true if output.blank?
+
+    output[/^Status: (200)/, 1] != "200"
+  end
+
+  def repo_commits_for_user(nwo, user, filter, args)
+    return if Homebrew::EnvConfig.no_github_api?
+
+    params = ["#{filter}=#{user}"]
+    params << "since=#{DateTime.parse(args.from).iso8601}" if args.from
+    params << "until=#{DateTime.parse(args.to).iso8601}" if args.to
+
+    commits = []
+    API.paginate_rest("#{API_URL}/repos/#{nwo}/commits", additional_query_params: params.join("&")) do |result|
+      commits.concat(result.map { |c| c["sha"] })
+    end
+    commits
+  end
+
+  def count_repo_commits(nwo, user, filter, args)
+    return if Homebrew::EnvConfig.no_github_api?
+
+    author_shas = repo_commits_for_user(nwo, user, "author", args)
+    return author_shas.count if filter == "author"
+
+    committer_shas = repo_commits_for_user(nwo, user, "committer", args)
+    return 0 if committer_shas.empty?
+
+    # Only count commits where the author and committer are different.
+    committer_shas.difference(author_shas).count
   end
 end

@@ -58,9 +58,9 @@ describe OS::Mac::Version do
 
   describe "#new" do
     it "raises an error if the version is not a valid macOS version" do
-      expect {
+      expect do
         described_class.new("1.2")
-      }.to raise_error(MacOSVersionError, 'unknown or unsupported macOS version: "1.2"')
+      end.to raise_error(MacOSVersionError, 'unknown or unsupported macOS version: "1.2"')
     end
 
     it "creates a new version from a valid macOS version" do
@@ -71,9 +71,9 @@ describe OS::Mac::Version do
 
   describe "#from_symbol" do
     it "raises an error if the symbol is not a valid macOS version" do
-      expect {
+      expect do
         described_class.from_symbol(:foo)
-      }.to raise_error(MacOSVersionError, "unknown or unsupported macOS version: :foo")
+      end.to raise_error(MacOSVersionError, "unknown or unsupported macOS version: :foo")
     end
 
     it "creates a new version from a valid macOS version" do
@@ -85,7 +85,6 @@ describe OS::Mac::Version do
   specify "#pretty_name" do
     expect(described_class.new("10.11").pretty_name).to eq("El Capitan")
     expect(described_class.new("10.14").pretty_name).to eq("Mojave")
-    expect(described_class.new("10.10").pretty_name).to eq("Yosemite")
   end
 
   specify "#requires_nehalem_cpu?" do

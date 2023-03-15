@@ -111,7 +111,7 @@ module Homebrew
           constant = Strategy.const_get(const_symbol)
           next unless constant.is_a?(Class)
 
-          key = const_symbol.to_s.underscore.to_sym
+          key = Utils.underscore(const_symbol).to_sym
           @strategies[key] = constant
         end
         @strategies
@@ -151,21 +151,25 @@ module Homebrew
         ).returns(T::Array[T.untyped])
       }
       def from_url(url, livecheck_strategy: nil, url_provided: false, regex_provided: false, block_provided: false)
-        usable_strategies = strategies.values.select do |strategy|
+        usable_strategies = strategies.select do |strategy_symbol, strategy|
           if strategy == PageMatch
-            # Only treat the `PageMatch` strategy as usable if a regex is
-            # present in the `livecheck` block
+            # Only treat the strategy as usable if the `livecheck` block
+            # contains a regex and/or `strategy` block
             next if !regex_provided && !block_provided
+          elsif [Json, Xml, Yaml].include?(strategy)
+            # Only treat the strategy as usable if the `livecheck` block
+            # specifies the strategy and contains a `strategy` block
+            next if (livecheck_strategy != strategy_symbol) || !block_provided
           elsif strategy.const_defined?(:PRIORITY) &&
                 !strategy::PRIORITY.positive? &&
-                from_symbol(livecheck_strategy) != strategy
+                livecheck_strategy != strategy_symbol
             # Ignore strategies with a priority of 0 or lower, unless the
             # strategy is specified in the `livecheck` block
             next
           end
 
           strategy.respond_to?(:match?) && strategy.match?(url)
-        end
+        end.values
 
         # Sort usable strategies in descending order by priority, using the
         # DEFAULT_PRIORITY when a strategy doesn't contain a PRIORITY constant
@@ -273,10 +277,13 @@ require_relative "strategy/gnome"
 require_relative "strategy/gnu"
 require_relative "strategy/hackage"
 require_relative "strategy/header_match"
+require_relative "strategy/json"
 require_relative "strategy/launchpad"
 require_relative "strategy/npm"
 require_relative "strategy/page_match"
 require_relative "strategy/pypi"
 require_relative "strategy/sourceforge"
 require_relative "strategy/sparkle"
+require_relative "strategy/xml"
 require_relative "strategy/xorg"
+require_relative "strategy/yaml"

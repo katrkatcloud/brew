@@ -1,4 +1,4 @@
-# typed: false
+# typed: true
 # frozen_string_literal: true
 
 require "formula"
@@ -39,28 +39,47 @@ module Readall
       !failed
     end
 
-    def valid_formulae?(formulae)
+    def valid_formulae?(formulae, bottle_tag: nil)
       success = T.let(true, T::Boolean)
       formulae.each do |file|
-        Formulary.factory(file)
+        base = Formulary.factory(file)
+        next if bottle_tag.blank? || !base.path.exist? || !base.class.on_system_blocks_exist?
+
+        formula_contents = base.path.read
+
+        readall_namespace = Formulary.class_s("Readall#{bottle_tag.to_sym.capitalize}")
+        readall_formula_class = Formulary.load_formula(base.name, base.path, formula_contents, readall_namespace,
+                                                       flags: base.class.build_flags, ignore_errors: true)
+        readall_formula_class.new(base.name, base.path, :stable,
+                                  alias_path: base.alias_path, force_bottle: base.force_bottle)
       rescue Interrupt
         raise
       rescue Exception => e # rubocop:disable Lint/RescueException
-        onoe "Invalid formula: #{file}"
+        onoe "Invalid formula (#{bottle_tag}): #{file}"
         $stderr.puts e
         success = false
       end
       success
     end
 
-    def valid_casks?(casks)
+    def valid_casks?(casks, bottle_tag: nil)
+      return true if bottle_tag.present? && bottle_tag.system == :linux
+
       success = T.let(true, T::Boolean)
       casks.each do |file|
-        Cask::CaskLoader.load(file)
+        cask = Cask::CaskLoader.load(file)
+
+        # Fine to have missing URLs for unsupported macOS
+        macos_req = cask.depends_on.macos
+        next if macos_req&.version && Array(macos_req.version).none? do |macos_version|
+          bottle_tag.to_macos_version.public_send(macos_req.comparator, macos_version)
+        end
+
+        raise "Missing URL" if cask.url.nil?
       rescue Interrupt
         raise
       rescue Exception => e # rubocop:disable Lint/RescueException
-        onoe "Invalid cask: #{file}"
+        onoe "Invalid cask (#{bottle_tag}): #{file}"
         $stderr.puts e
         success = false
       end
@@ -73,17 +92,35 @@ module Readall
         valid_aliases = valid_aliases?(tap.alias_dir, tap.formula_dir)
         success = false unless valid_aliases
       end
-      valid_formulae = valid_formulae?(tap.formula_files)
-      valid_casks = valid_casks?(tap.cask_files)
-      success = false if !valid_formulae || !valid_casks
+      if options[:no_simulate]
+        success = false unless valid_formulae?(tap.formula_files)
+        success = false unless valid_casks?(tap.cask_files)
+      else
+        arches = [:arm, :intel]
+        os_names = [*MacOSVersions::SYMBOLS.keys, :linux]
+        arches.each do |arch|
+          os_names.each do |os_name|
+            bottle_tag = Utils::Bottles::Tag.new(system: os_name, arch: arch)
+            next unless bottle_tag.valid_combination?
+
+            Homebrew::SimulateSystem.arch = arch
+            Homebrew::SimulateSystem.os = os_name
+
+            success = false unless valid_formulae?(tap.formula_files, bottle_tag: bottle_tag)
+            success = false unless valid_casks?(tap.cask_files, bottle_tag: bottle_tag)
+
+            Homebrew::SimulateSystem.clear
+          end
+        end
+      end
       success
     end
 
     private
 
-    def syntax_errors_or_warnings?(rb)
+    def syntax_errors_or_warnings?(filename)
       # Retrieve messages about syntax errors/warnings printed to `$stderr`.
-      _, err, status = system_command(RUBY_PATH, args: ["-c", "-w", rb], print_stderr: false)
+      _, err, status = system_command(RUBY_PATH, args: ["-c", "-w", filename], print_stderr: false)
 
       # Ignore unnecessary warning about named capture conflicts.
       # See https://bugs.ruby-lang.org/issues/12359.

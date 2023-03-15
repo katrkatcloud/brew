@@ -13,7 +13,7 @@ describe RuboCop::Cop::FormulaAudit::Miscellaneous do
           desc "foo"
           url 'https://brew.sh/foo-1.0.tgz'
           FileUtils.mv "hello"
-          ^^^^^^^^^^^^^^^^^^^^ Don\'t need \'FileUtils.\' before mv
+          ^^^^^^^^^^^^^^^^^^^^ Don't need 'FileUtils.' before mv
         end
       RUBY
     end
@@ -24,7 +24,7 @@ describe RuboCop::Cop::FormulaAudit::Miscellaneous do
           desc "foo"
           url 'https://brew.sh/foo-1.0.tgz'
           inreplace "foo" do |longvar|
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ \"inreplace <filenames> do |s|\" is preferred over \"|longvar|\".
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ "inreplace <filenames> do |s|" is preferred over "|longvar|".
             somerandomCall(longvar)
           end
         end
@@ -255,14 +255,14 @@ describe RuboCop::Cop::FormulaAudit::Miscellaneous do
       RUBY
     end
 
-    it "reports an offense when a hard-coded `llvm-g++` is set as COMPILER_PATH" do
+    it "reports an offense when a hard-coded `c++` is set as COMPILER_PATH" do
       expect_offense(<<~'RUBY')
         class Foo < Formula
           desc "foo"
           url 'https://brew.sh/foo-1.0.tgz'
           def install
-            ENV["COMPILER_PATH"] = "/usr/bin/llvm-g++"
-                                   ^^^^^^^^^^^^^^^^^^^ Use "#{ENV.cxx}" instead of hard-coding "llvm-g++"
+            ENV["COMPILER_PATH"] = "/usr/bin/c++"
+                                   ^^^^^^^^^^^^^^ Use "#{ENV.cxx}" instead of hard-coding "c++"
           end
         end
       RUBY
@@ -275,7 +275,7 @@ describe RuboCop::Cop::FormulaAudit::Miscellaneous do
           url 'https://brew.sh/foo-1.0.tgz'
           def install
             ENV["COMPILER_PATH"] = "/usr/bin/gcc"
-                                   ^^^^^^^^^^^^^^ Use \"\#{ENV.cc}\" instead of hard-coding \"gcc\"
+                                   ^^^^^^^^^^^^^^ Use "\#{ENV.cc}" instead of hard-coding "gcc"
           end
         end
       RUBY
@@ -339,7 +339,7 @@ describe RuboCop::Cop::FormulaAudit::Miscellaneous do
           desc "foo"
           url 'https://brew.sh/foo-1.0.tgz'
           depends_on "lpeg" => :lua51
-                               ^^^^^^ lua modules should be vendored rather than use deprecated `depends_on \"lpeg\" => :lua51`
+                               ^^^^^^ lua modules should be vendored rather than use deprecated `depends_on "lpeg" => :lua51`
         end
       RUBY
     end
@@ -413,7 +413,7 @@ describe RuboCop::Cop::FormulaAudit::Miscellaneous do
           desc "foo"
           url 'https://brew.sh/foo-1.0.tgz'
           needs :openmp
-          ^^^^^^^^^^^^^ 'needs :openmp' should be replaced with 'depends_on \"gcc\"'
+          ^^^^^^^^^^^^^ 'needs :openmp' should be replaced with 'depends_on "gcc"'
         end
       RUBY
     end

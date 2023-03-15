@@ -1,4 +1,4 @@
-# typed: false
+# typed: true
 # frozen_string_literal: true
 
 require "cask/artifact/abstract_artifact"
@@ -31,7 +31,9 @@ module Cask
       # Extension module for script installers.
       module ScriptInstaller
         def install_phase(command: nil, **_)
-          ohai "Running #{self.class.dsl_key} script '#{path}'"
+          # TODO: The `T.unsafe` is a false positive that is unnecessary in newer releasese of Sorbet
+          # (confirmend with sorbet v0.5.10672)
+          ohai "Running #{T.unsafe(self.class).dsl_key} script '#{path}'"
 
           executable_path = staged_path_join_executable(path)
 
@@ -39,7 +41,7 @@ module Cask
             executable_path,
             **args,
             env: { "PATH" => PATH.new(
-              HOMEBREW_PREFIX/"bin", HOMEBREW_PREFIX/"sbin", ENV["PATH"]
+              HOMEBREW_PREFIX/"bin", HOMEBREW_PREFIX/"sbin", ENV.fetch("PATH")
             ) },
           )
         end
@@ -72,7 +74,7 @@ module Cask
       attr_reader :path, :args
 
       def initialize(cask, **args)
-        super(cask)
+        super(cask, **args)
 
         if args.key?(:manual)
           @path = Pathname(args[:manual])

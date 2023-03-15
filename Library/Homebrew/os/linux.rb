@@ -1,6 +1,8 @@
 # typed: true
 # frozen_string_literal: true
 
+require "utils"
+
 module OS
   # Helper module for querying system information on Linux.
   module Linux
@@ -25,17 +27,34 @@ module OS
         "Unknown"
       end
     end
+
+    sig { returns(T::Boolean) }
+    def wsl?
+      /-microsoft/i.match?(OS.kernel_version.to_s)
+    end
+
+    sig { returns(Version) }
+    def wsl_version
+      return Version::NULL unless wsl?
+
+      kernel = OS.kernel_version.to_s
+      if Version.new(T.must(kernel[/^([0-9.]*)-.*/, 1])) > Version.new("5.15")
+        Version.new("2 (Microsoft Store)")
+      elsif kernel.include?("-microsoft")
+        Version.new("2")
+      elsif kernel.include?("-Microsoft")
+        Version.new("1")
+      else
+        Version::NULL
+      end
+    end
   end
 
   # rubocop:disable Style/Documentation
   module Mac
     module_function
 
-    # rubocop:disable Naming/ConstantName
-    # rubocop:disable Style/MutableConstant
     ::MacOS = OS::Mac
-    # rubocop:enable Naming/ConstantName
-    # rubocop:enable Style/MutableConstant
 
     raise "Loaded OS::Linux on generic OS!" if ENV["HOMEBREW_TEST_GENERIC_OS"]
 
@@ -59,11 +78,11 @@ module OS
       false
     end
 
-    def sdk_path_if_needed(_v = nil)
+    def sdk_path_if_needed(_version = nil)
       nil
     end
 
-    def sdk_path
+    def sdk_path(_version = nil)
       nil
     end
 

@@ -418,7 +418,7 @@ class Pathname
   def install_metafiles(from = Pathname.pwd)
     Pathname(from).children.each do |p|
       next if p.directory?
-      next if File.zero?(p)
+      next if File.empty?(p)
       next unless Metafiles.copy?(p.basename.to_s)
 
       # Some software symlinks these files (see help2man.rb)
@@ -484,7 +484,6 @@ module ObserverPathnameExtension
     end
 
     sig { returns([Integer, Integer]) }
-
     def counts
       [n, d]
     end

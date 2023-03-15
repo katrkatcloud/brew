@@ -1,4 +1,4 @@
-# typed: false
+# typed: true
 # frozen_string_literal: true
 
 require "formula_installer"
@@ -57,6 +57,10 @@ module Homebrew
         [:switch, "--keep-tmp", {
           description: "Retain the temporary files created during installation.",
         }],
+        [:switch, "--debug-symbols", {
+          depends_on:  "--build-from-source",
+          description: "Generate debug symbols on build. Source will be retained in a cache directory.",
+        }],
         [:switch, "--display-times", {
           env:         :display_install_times,
           description: "Print install times for each formula at the end of the run.",
@@ -64,18 +68,20 @@ module Homebrew
         [:switch, "-g", "--git", {
           description: "Create a Git repository, useful for creating patches to the software.",
         }],
-      ].each do |options|
-        send(*options)
-        conflicts "--cask", options[-2]
+      ].each do |args|
+        options = args.pop
+        send(*args, **options)
+        conflicts "--cask", args.last
       end
       formula_options
       [
         [:switch, "--cask", "--casks", { description: "Treat all named arguments as casks." }],
-        *Cask::Cmd::AbstractCommand::OPTIONS,
-        *Cask::Cmd::Install::OPTIONS,
-      ].each do |options|
-        send(*options)
-        conflicts "--formula", options[-2]
+        *Cask::Cmd::AbstractCommand::OPTIONS.map(&:dup),
+        *Cask::Cmd::Install::OPTIONS.map(&:dup),
+      ].each do |args|
+        options = args.pop
+        send(*args, **options)
+        conflicts "--formula", args.last
       end
       cask_options
 
@@ -88,27 +94,18 @@ module Homebrew
   def reinstall
     args = reinstall_args.parse
 
-    # We need to use the bottle API instead of just using the formula file
-    # from an installed keg because it will not contain bottle information.
-    # As a consequence, `brew reinstall` will also upgrade outdated formulae
-    if Homebrew::EnvConfig.install_from_api?
-      args.named.each do |name|
-        formula = Formulary.factory(name)
-        next unless formula.any_version_installed?
-        next if formula.tap.present? && !formula.core_formula?
-        next unless Homebrew::API::Bottle.available?(name)
-
-        Homebrew::API::Bottle.fetch_bottles(name)
-      rescue FormulaUnavailableError
-        next
-      end
-    end
-
     formulae, casks = args.named.to_formulae_and_casks(method: :resolve)
                           .partition { |o| o.is_a?(Formula) }
 
-    if args.build_from_source? && !DevelopmentTools.installed?
-      raise BuildFlagsError.new(["--build-from-source"], bottled: formulae.all?(&:bottled?))
+    if args.build_from_source?
+      unless DevelopmentTools.installed?
+        raise BuildFlagsError.new(["--build-from-source"], bottled: formulae.all?(&:bottled?))
+      end
+
+      unless Homebrew::EnvConfig.developer?
+        opoo "building from source is not supported!"
+        puts "You're on your own. Failures are expected so don't create any issues, please!"
+      end
     end
 
     Install.perform_preinstall_checks
@@ -127,6 +124,7 @@ module Homebrew
         build_from_source_formulae: args.build_from_source_formulae,
         interactive:                args.interactive?,
         keep_tmp:                   args.keep_tmp?,
+        debug_symbols:              args.debug_symbols?,
         force:                      args.force?,
         debug:                      args.debug?,
         quiet:                      args.quiet?,
@@ -144,6 +142,7 @@ module Homebrew
       build_from_source_formulae: args.build_from_source_formulae,
       interactive:                args.interactive?,
       keep_tmp:                   args.keep_tmp?,
+      debug_symbols:              args.debug_symbols?,
       force:                      args.force?,
       debug:                      args.debug?,
       quiet:                      args.quiet?,
@@ -162,6 +161,8 @@ module Homebrew
         zap:            args.zap?,
       )
     end
+
+    Cleanup.periodic_clean!
 
     Homebrew.messages.display_messages(display_times: args.display_times?)
   end

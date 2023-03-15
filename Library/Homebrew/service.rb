@@ -1,6 +1,8 @@
 # typed: true
 # frozen_string_literal: true
 
+require "extend/on_system"
+
 module Homebrew
   # The {Service} class implements the DSL methods used in a formula's
   # `service` block and stores related instance variables. Most of these methods
@@ -8,6 +10,7 @@ module Homebrew
   class Service
     extend T::Sig
     extend Forwardable
+    include OnSystem::MacOSAndLinux
 
     RUN_TYPE_IMMEDIATE = :immediate
     RUN_TYPE_INTERVAL = :interval
@@ -24,12 +27,25 @@ module Homebrew
     def initialize(formula, &block)
       @formula = formula
       @run_type = RUN_TYPE_IMMEDIATE
+      @run_at_load = true
       @environment_variables = {}
       @service_block = block
     end
 
-    sig { params(command: T.nilable(T.any(T::Array[String], String, Pathname))).returns(T.nilable(Array)) }
-    def run(command = nil)
+    sig { returns(Formula) }
+    def f
+      @formula
+    end
+
+    sig {
+      params(
+        command: T.nilable(T.any(T::Array[String], String, Pathname)),
+        macos:   T.nilable(T.any(T::Array[String], String, Pathname)),
+        linux:   T.nilable(T.any(T::Array[String], String, Pathname)),
+      ).returns(T.nilable(Array))
+    }
+    def run(command = nil, macos: nil, linux: nil)
+      command ||= on_system_conditional(macos: macos, linux: linux)
       case T.unsafe(command)
       when nil
         @run
@@ -124,6 +140,38 @@ module Homebrew
       end
     end
 
+    sig { params(value: T.nilable(T::Boolean)).returns(T.nilable(T::Boolean)) }
+    def require_root(value = nil)
+      case T.unsafe(value)
+      when nil
+        @require_root
+      when true, false
+        @require_root = value
+      else
+        raise TypeError, "Service#require_root expects a Boolean"
+      end
+    end
+
+    # Returns a `Boolean` describing if a service requires root access.
+    # @return [Boolean]
+    sig { returns(T::Boolean) }
+    def requires_root?
+      instance_eval(&@service_block)
+      @require_root.present? && @require_root == true
+    end
+
+    sig { params(value: T.nilable(T::Boolean)).returns(T.nilable(T::Boolean)) }
+    def run_at_load(value = nil)
+      case T.unsafe(value)
+      when nil
+        @run_at_load
+      when true, false
+        @run_at_load = value
+      else
+        raise TypeError, "Service#run_at_load expects a Boolean"
+      end
+    end
+
     sig { params(value: T.nilable(String)).returns(T.nilable(T::Hash[Symbol, String])) }
     def sockets(value = nil)
       case T.unsafe(value)
@@ -180,8 +228,8 @@ module Homebrew
       when :background, :standard, :interactive, :adaptive
         @process_type = value
       when Symbol
-        raise TypeError, "Service#process_type allows: "\
-                         "'#{PROCESS_TYPE_BACKGROUND}'/'#{PROCESS_TYPE_STANDARD}'/"\
+        raise TypeError, "Service#process_type allows: " \
+                         "'#{PROCESS_TYPE_BACKGROUND}'/'#{PROCESS_TYPE_STANDARD}'/" \
                          "'#{PROCESS_TYPE_INTERACTIVE}'/'#{PROCESS_TYPE_ADAPTIVE}'"
       else
         raise TypeError, "Service#process_type expects a Symbol"
@@ -301,10 +349,10 @@ module Homebrew
       "#{HOMEBREW_PREFIX}/bin:#{HOMEBREW_PREFIX}/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
     end
 
-    sig { returns(T::Array[String]) }
+    sig { returns(T.nilable(T::Array[String])) }
     def command
       instance_eval(&@service_block)
-      @run.map(&:to_s)
+      @run&.map(&:to_s)
     end
 
     # Returns the `String` command to run manually instead of the service.
@@ -315,7 +363,8 @@ module Homebrew
       vars = @environment_variables.except(:PATH)
                                    .map { |k, v| "#{k}=\"#{v}\"" }
 
-      out = vars + command
+      cmd = command
+      out = vars + cmd if cmd.present?
       out.join(" ")
     end
 
@@ -335,7 +384,7 @@ module Homebrew
       base = {
         Label:            @formula.plist_name,
         ProgramArguments: command,
-        RunAtLoad:        @run_type == RUN_TYPE_IMMEDIATE,
+        RunAtLoad:        @run_at_load == true,
       }
 
       base[:LaunchOnlyOnce] = @launch_only_once if @launch_only_once == true
@@ -376,6 +425,14 @@ module Homebrew
         base[:StartCalendarInterval] = @cron.reject { |_, value| value == "*" }
       end
 
+      # Adding all session types has as the primary effect that if you initialise it through e.g. a Background session
+      # and you later "physically" sign in to the owning account (Aqua session), things shouldn't flip out.
+      # Also, we're not checking @process_type here because that is used to indicate process priority and not
+      # necessarily if it should run in a specific session type. Like database services could run with ProcessType
+      # Interactive so they have no resource limitations enforced upon them, but they aren't really interactive in the
+      # general sense.
+      base[:LimitLoadToSessionType] = %w[Aqua Background LoginWindow StandardIO System]
+
       base.to_plist
     end
 
@@ -388,16 +445,16 @@ module Homebrew
         Description=Homebrew generated unit for #{@formula.name}
 
         [Install]
-        WantedBy=multi-user.target
+        WantedBy=default.target
 
         [Service]
       EOS
 
       # command needs to be first because it initializes all other values
-      cmd = command.join(" ")
+      cmd = command&.join(" ")
 
       options = []
-      options << "Type=#{@launch_only_once == true ? "oneshot" : "simple"}"
+      options << "Type=#{(@launch_only_once == true) ? "oneshot" : "simple"}"
       options << "ExecStart=#{cmd}"
 
       options << "Restart=always" if @keep_alive.present? && @keep_alive[:always].present?
@@ -433,8 +490,8 @@ module Homebrew
       options << "OnUnitActiveSec=#{@interval}" if @run_type == RUN_TYPE_INTERVAL
 
       if @run_type == RUN_TYPE_CRON
-        minutes = @cron[:Minute] == "*" ? "*" : format("%02d", @cron[:Minute])
-        hours   = @cron[:Hour] == "*" ? "*" : format("%02d", @cron[:Hour])
+        minutes = (@cron[:Minute] == "*") ? "*" : format("%02d", @cron[:Minute])
+        hours   = (@cron[:Hour] == "*") ? "*" : format("%02d", @cron[:Hour])
         options << "OnCalendar=#{@cron[:Weekday]}-*-#{@cron[:Month]}-#{@cron[:Day]} #{hours}:#{minutes}:00"
       end
 

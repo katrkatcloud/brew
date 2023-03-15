@@ -13,32 +13,9 @@ module OS
     class Version < ::Version
       extend T::Sig
 
-      SYMBOLS = {
-        monterey:    "12",
-        big_sur:     "11",
-        catalina:    "10.15",
-        mojave:      "10.14",
-        high_sierra: "10.13",
-        sierra:      "10.12",
-        el_capitan:  "10.11",
-        yosemite:    "10.10",
-      }.freeze
-
-      # TODO: bump version when new macOS is released or announced
-      # and also update references in docs/Installation.md and
-      # https://github.com/Homebrew/install/blob/HEAD/install.sh
-      MACOS_NEWEST_UNSUPPORTED = "13"
-      private_constant :MACOS_NEWEST_UNSUPPORTED
-
-      # TODO: bump version when new macOS is released and also update
-      # references in docs/Installation.md and
-      # https://github.com/Homebrew/install/blob/HEAD/install.sh
-      MACOS_OLDEST_SUPPORTED = "10.15"
-      private_constant :MACOS_OLDEST_SUPPORTED
-
       sig { params(version: Symbol).returns(T.attached_class) }
       def self.from_symbol(version)
-        str = SYMBOLS.fetch(version) { raise MacOSVersionError, version }
+        str = MacOSVersions::SYMBOLS.fetch(version) { raise MacOSVersionError, version }
         new(str)
       end
 
@@ -56,10 +33,10 @@ module OS
       sig { override.params(other: T.untyped).returns(T.nilable(Integer)) }
       def <=>(other)
         @comparison_cache.fetch(other) do
-          if SYMBOLS.key?(other) && to_sym == other
+          if MacOSVersions::SYMBOLS.key?(other) && to_sym == other
             0
           else
-            v = SYMBOLS.fetch(other) { other.to_s }
+            v = MacOSVersions::SYMBOLS.fetch(other) { other.to_s }
             @comparison_cache[other] = super(::Version.new(v))
           end
         end
@@ -77,7 +54,7 @@ module OS
 
       sig { returns(Symbol) }
       def to_sym
-        @to_sym ||= SYMBOLS.invert.fetch(strip_patch.to_s, :dunno)
+        @to_sym ||= MacOSVersions::SYMBOLS.invert.fetch(strip_patch.to_s, :dunno)
       end
 
       sig { returns(String) }
@@ -87,12 +64,12 @@ module OS
 
       sig { returns(T::Boolean) }
       def outdated_release?
-        self < MACOS_OLDEST_SUPPORTED
+        self < HOMEBREW_MACOS_OLDEST_SUPPORTED
       end
 
       sig { returns(T::Boolean) }
       def prerelease?
-        self >= MACOS_NEWEST_UNSUPPORTED
+        self >= HOMEBREW_MACOS_NEWEST_UNSUPPORTED
       end
 
       # For {OS::Mac::Version} compatibility.

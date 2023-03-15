@@ -30,6 +30,10 @@ module Homebrew
       Diagnostic.checks(:build_from_source_checks, fatal: all_fatal)
     end
 
+    def global_post_install; end
+    alias generic_global_post_install global_post_install
+    module_function :generic_global_post_install
+
     def check_prefix
       if (Hardware::CPU.intel? || Hardware::CPU.in_rosetta2?) &&
          HOMEBREW_PREFIX.to_s == HOMEBREW_MACOS_ARM_DEFAULT_PREFIX
@@ -93,7 +97,7 @@ module Homebrew
     private_class_method :check_cc_argv
 
     def install_formula?(
-      f,
+      formula,
       head: false,
       fetch_head: false,
       only_dependencies: false,
@@ -101,49 +105,51 @@ module Homebrew
       quiet: false
     )
       # head-only without --HEAD is an error
-      if !head && f.stable.nil?
+      if !head && formula.stable.nil?
         odie <<~EOS
-          #{f.full_name} is a head-only formula.
+          #{formula.full_name} is a head-only formula.
           To install it, run:
-            brew install --HEAD #{f.full_name}
+            brew install --HEAD #{formula.full_name}
         EOS
       end
 
       # --HEAD, fail with no head defined
-      odie "No head is defined for #{f.full_name}" if head && f.head.nil?
+      odie "No head is defined for #{formula.full_name}" if head && formula.head.nil?
 
-      installed_head_version = f.latest_head_version
+      installed_head_version = formula.latest_head_version
       if installed_head_version &&
-         !f.head_version_outdated?(installed_head_version, fetch_head: fetch_head)
+         !formula.head_version_outdated?(installed_head_version, fetch_head: fetch_head)
         new_head_installed = true
       end
-      prefix_installed = f.prefix.exist? && !f.prefix.children.empty?
+      prefix_installed = formula.prefix.exist? && !formula.prefix.children.empty?
 
-      if f.keg_only? && f.any_version_installed? && f.optlinked? && !force
+      if formula.keg_only? && formula.any_version_installed? && formula.optlinked? && !force
         # keg-only install is only possible when no other version is
         # linked to opt, because installing without any warnings can break
         # dependencies. Therefore before performing other checks we need to be
         # sure --force flag is passed.
-        if f.outdated?
-          if !Homebrew::EnvConfig.no_install_upgrade? && !f.pinned?
-            puts "#{f.name} #{f.linked_version} is already installed but outdated (so it will be upgraded)."
+        if formula.outdated?
+          if !Homebrew::EnvConfig.no_install_upgrade? && !formula.pinned?
+            name = formula.name
+            version = formula.linked_version
+            puts "#{name} #{version} is already installed but outdated (so it will be upgraded)."
             return true
           end
 
-          unpin_cmd_if_needed = ("brew unpin #{f.full_name} && " if f.pinned?)
-          optlinked_version = Keg.for(f.opt_prefix).version
+          unpin_cmd_if_needed = ("brew unpin #{formula.full_name} && " if formula.pinned?)
+          optlinked_version = Keg.for(formula.opt_prefix).version
           onoe <<~EOS
-            #{f.full_name} #{optlinked_version} is already installed.
-            To upgrade to #{f.version}, run:
-              #{unpin_cmd_if_needed}brew upgrade #{f.full_name}
+            #{formula.full_name} #{optlinked_version} is already installed.
+            To upgrade to #{formula.version}, run:
+              #{unpin_cmd_if_needed}brew upgrade #{formula.full_name}
           EOS
         elsif only_dependencies
           return true
         elsif !quiet
           opoo <<~EOS
-            #{f.full_name} #{f.pkg_version} is already installed and up-to-date.
-            To reinstall #{f.pkg_version}, run:
-              brew reinstall #{f.name}
+            #{formula.full_name} #{formula.pkg_version} is already installed and up-to-date.
+            To reinstall #{formula.pkg_version}, run:
+              brew reinstall #{formula.name}
           EOS
         end
       elsif (head && new_head_installed) || prefix_installed
@@ -152,27 +158,27 @@ module Homebrew
         # install is not already installed.
 
         installed_version = if head
-          f.latest_head_version
+          formula.latest_head_version
         else
-          f.pkg_version
+          formula.pkg_version
         end
 
-        msg = "#{f.full_name} #{installed_version} is already installed"
-        linked_not_equals_installed = f.linked_version != installed_version
-        if f.linked? && linked_not_equals_installed
+        msg = "#{formula.full_name} #{installed_version} is already installed"
+        linked_not_equals_installed = formula.linked_version != installed_version
+        if formula.linked? && linked_not_equals_installed
           msg = if quiet
             nil
           else
             <<~EOS
               #{msg}.
-              The currently linked version is: #{f.linked_version}
+              The currently linked version is: #{formula.linked_version}
             EOS
           end
-        elsif !f.linked? || f.keg_only?
+        elsif !formula.linked? || formula.keg_only?
           msg = <<~EOS
             #{msg}, it's just not linked.
             To link this version, run:
-              brew link #{f}
+              brew link #{formula}
           EOS
         elsif only_dependencies
           msg = nil
@@ -183,13 +189,13 @@ module Homebrew
           else
             <<~EOS
               #{msg} and up-to-date.
-              To reinstall #{f.pkg_version}, run:
-                brew reinstall #{f.name}
+              To reinstall #{formula.pkg_version}, run:
+                brew reinstall #{formula.name}
             EOS
           end
         end
         opoo msg if msg
-      elsif !f.any_version_installed? && (old_formula = f.old_installed_formulae.first)
+      elsif !formula.any_version_installed? && (old_formula = formula.old_installed_formulae.first)
         msg = "#{old_formula.full_name} #{old_formula.any_installed_version} already installed"
         msg = if !old_formula.linked? && !old_formula.keg_only?
           <<~EOS
@@ -203,37 +209,37 @@ module Homebrew
           "#{msg}."
         end
         opoo msg if msg
-      elsif f.migration_needed? && !force
+      elsif formula.migration_needed? && !force
         # Check if the formula we try to install is the same as installed
         # but not migrated one. If --force is passed then install anyway.
         opoo <<~EOS
-          #{f.oldname} is already installed, it's just not migrated.
+          #{formula.oldname} is already installed, it's just not migrated.
           To migrate this formula, run:
-            brew migrate #{f}
+            brew migrate #{formula}
           Or to force-install it, run:
-            brew install #{f} --force
+            brew install #{formula} --force
         EOS
-      elsif f.linked?
-        message = "#{f.name} #{f.linked_version} is already installed"
-        if f.outdated? && !head
-          if !Homebrew::EnvConfig.no_install_upgrade? && !f.pinned?
+      elsif formula.linked?
+        message = "#{formula.name} #{formula.linked_version} is already installed"
+        if formula.outdated? && !head
+          if !Homebrew::EnvConfig.no_install_upgrade? && !formula.pinned?
             puts "#{message} but outdated (so it will be upgraded)."
             return true
           end
 
-          unpin_cmd_if_needed = ("brew unpin #{f.full_name} && " if f.pinned?)
+          unpin_cmd_if_needed = ("brew unpin #{formula.full_name} && " if formula.pinned?)
           onoe <<~EOS
             #{message}
-            To upgrade to #{f.pkg_version}, run:
-              #{unpin_cmd_if_needed}brew upgrade #{f.full_name}
+            To upgrade to #{formula.pkg_version}, run:
+              #{unpin_cmd_if_needed}brew upgrade #{formula.full_name}
           EOS
         elsif only_dependencies
           return true
         else
           onoe <<~EOS
             #{message}
-            To install #{f.pkg_version}, first run:
-              brew unlink #{f.name}
+            To install #{formula.pkg_version}, first run:
+              brew unlink #{formula.name}
           EOS
         end
       else
@@ -244,9 +250,9 @@ module Homebrew
 
       # Even if we don't install this formula mark it as no longer just
       # installed as a dependency.
-      return false unless f.opt_prefix.directory?
+      return false unless formula.opt_prefix.directory?
 
-      keg = Keg.new(f.opt_prefix.resolved_path)
+      keg = Keg.new(formula.opt_prefix.resolved_path)
       tab = Tab.for_keg(keg)
       unless tab.installed_on_request
         tab.installed_on_request = true
@@ -269,18 +275,20 @@ module Homebrew
       git: false,
       interactive: false,
       keep_tmp: false,
+      debug_symbols: false,
       force: false,
       overwrite: false,
       debug: false,
       quiet: false,
-      verbose: false
+      verbose: false,
+      dry_run: false
     )
-      formula_installers = formulae_to_install.map do |f|
-        Migrator.migrate_if_needed(f, force: force)
-        build_options = f.build
+      formula_installers = formulae_to_install.map do |formula|
+        Migrator.migrate_if_needed(formula, force: force, dry_run: dry_run)
+        build_options = formula.build
 
-        fi = FormulaInstaller.new(
-          f,
+        formula_installer = FormulaInstaller.new(
+          formula,
           options:                    build_options.used_options,
           build_bottle:               build_bottle,
           force_bottle:               force_bottle,
@@ -293,6 +301,7 @@ module Homebrew
           git:                        git,
           interactive:                interactive,
           keep_tmp:                   keep_tmp,
+          debug_symbols:              debug_symbols,
           force:                      force,
           overwrite:                  overwrite,
           debug:                      debug,
@@ -301,17 +310,32 @@ module Homebrew
         )
 
         begin
-          fi.prelude
-          fi.fetch
-          fi
+          unless dry_run
+            formula_installer.prelude
+            formula_installer.fetch
+          end
+          formula_installer
         rescue CannotInstallFormulaError => e
           ofail e.message
           nil
         rescue UnsatisfiedRequirements, DownloadError, ChecksumMismatchError => e
-          ofail "#{f}: #{e}"
+          ofail "#{formula}: #{e}"
           nil
         end
       end.compact
+
+      if dry_run
+        if (formulae_name_to_install = formulae_to_install.map(&:name))
+          plural = Utils.pluralize("formula", formulae_name_to_install.count, plural: "e")
+          ohai "Would install #{formulae_name_to_install.count} #{plural}:"
+          puts formulae_name_to_install.join(" ")
+
+          formula_installers.each do |fi|
+            print_dry_run_dependencies(fi.formula, fi.compute_dependencies, &:name)
+          end
+        end
+        return
+      end
 
       formula_installers.each do |fi|
         install_formula(fi)
@@ -320,13 +344,22 @@ module Homebrew
     end
 
     def install_formula(formula_installer)
-      f = formula_installer.formula
+      formula = formula_installer.formula
 
-      upgrade = f.linked? && f.outdated? && !f.head? && !Homebrew::EnvConfig.no_install_upgrade?
+      upgrade = formula.linked? && formula.outdated? && !formula.head? && !Homebrew::EnvConfig.no_install_upgrade?
 
       Upgrade.install_formula(formula_installer, upgrade: upgrade)
     end
     private_class_method :install_formula
+
+    def print_dry_run_dependencies(formula, dependencies, &block)
+      return if dependencies.empty?
+
+      plural = Utils.pluralize("dependenc", dependencies.count, plural: "ies", singular: "y")
+      ohai "Would install #{dependencies.count} #{plural} for #{formula.name}:"
+      formula_names = dependencies.map(&:first).map(&:to_formula).map(&block)
+      puts formula_names.join(" ")
+    end
   end
 end
 

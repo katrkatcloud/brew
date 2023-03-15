@@ -151,7 +151,10 @@ class GitHubPackages
   end
 
   def schema_uri(basename, uris)
-    url = "https://raw.githubusercontent.com/opencontainers/image-spec/master/schema/#{basename}.json"
+    # The current `main` version has an invalid JSON schema.
+    # Going forward, this should probably be pinned to tags.
+    # We currently use features newer than the last one (v1.0.2).
+    url = "https://raw.githubusercontent.com/opencontainers/image-spec/170393e57ed656f7f81c3070bfa8c3346eaa0a5a/schema/#{basename}.json"
     out, = curl_output(url)
     json = JSON.parse(out)
 
@@ -173,9 +176,9 @@ class GitHubPackages
     puts
     ofail "#{Formatter.url(schema_uri)} JSON schema validation failed!"
     oh1 "Errors"
-    pp schema.validate(json).to_a
+    puts schema.validate(json).to_a.inspect
     oh1 "JSON"
-    pp json
+    puts json.inspect
     exit 1
   end
 
@@ -330,9 +333,9 @@ class GitHubPackages
         os_version ||= "macOS #{bottle_tag.to_macos_version}"
       when "linux"
         os_version&.delete_suffix!(" LTS")
-        os_version ||= OS::CI_OS_VERSION
+        os_version ||= OS::LINUX_CI_OS_VERSION
         glibc_version = tab["built_on"]["glibc_version"].presence if tab["built_on"].present?
-        glibc_version ||= OS::CI_GLIBC_VERSION
+        glibc_version ||= OS::LINUX_GLIBC_CI_VERSION
         cpu_variant = tab["oldest_cpu_family"] || Hardware::CPU::INTEL_64BIT_OLDEST_CPU.to_s
       end
 
@@ -351,8 +354,7 @@ class GitHubPackages
 
       config_json_sha256, config_json_size = write_image_config(platform_hash, tar_sha256.hexdigest, blobs)
 
-      formulae_dir = tag_hash["formulae_brew_sh_path"]
-      documentation = "https://formulae.brew.sh/#{formulae_dir}/#{formula_name}" if formula_core_tap
+      documentation = "https://formulae.brew.sh/formula/#{formula_name}" if formula_core_tap
 
       descriptor_annotations_hash = {
         "org.opencontainers.image.ref.name" => tag,
@@ -405,12 +407,21 @@ class GitHubPackages
                      "org.opencontainers.image.ref.name" => version_rebuild)
 
     puts
-    args = ["copy", "--all", "oci:#{root}", image_uri.to_s]
+    args = ["copy", "--retry-times=2", "--all", "oci:#{root}", image_uri.to_s]
     if dry_run
       puts "#{skopeo} #{args.join(" ")} --dest-creds=#{user}:$HOMEBREW_GITHUB_PACKAGES_TOKEN"
     else
       args << "--dest-creds=#{user}:#{token}"
-      system_command!(skopeo, verbose: true, print_stdout: true, args: args)
+      retry_count = 0
+      begin
+        system_command!(skopeo, verbose: true, print_stdout: true, args: args)
+      rescue ErrorDuringExecution
+        retry_count += 1
+        odie "Cannot perform an upload to registry after retrying multiple times!" if retry_count >= 5
+        sleep 5*retry_count
+        retry
+      end
+
       package_name = "#{GitHubPackages.repo_without_prefix(repo)}/#{image_name}"
       ohai "Uploaded to https://github.com/orgs/#{org}/packages/container/package/#{package_name}"
     end

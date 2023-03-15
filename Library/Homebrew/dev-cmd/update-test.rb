@@ -2,7 +2,6 @@
 # frozen_string_literal: true
 
 require "cli/parser"
-
 module Homebrew
   extend T::Sig
 
@@ -52,22 +51,15 @@ module Homebrew
       "master"
     end
 
-    start_commit, end_commit = nil
+    start_commit = nil
+    end_commit = "HEAD"
     cd HOMEBREW_REPOSITORY do
       start_commit = if (commit = args.commit)
         commit
       elsif (date = args.before)
         Utils.popen_read("git", "rev-list", "-n1", "--before=#{date}", "origin/master").chomp
       elsif args.to_tag?
-        tags = Utils.popen_read("git", "tag", "--list", "--sort=-version:refname")
-        if tags.blank?
-          tags = if (HOMEBREW_REPOSITORY/".git/shallow").exist?
-            safe_system "git", "fetch", "--tags", "--depth=1"
-            Utils.popen_read("git", "tag", "--list", "--sort=-version:refname")
-          elsif OS.linux?
-            Utils.popen_read("git tag --list | sort -rV")
-          end
-        end
+        tags = git_tags
         current_tag, previous_tag, = tags.lines
         current_tag = current_tag.to_s.chomp
         odie "Could not find current tag in:\n#{tags}" if current_tag.empty?
@@ -79,14 +71,13 @@ module Homebrew
         # ^0 ensures this points to the commit rather than the tag object.
         "#{previous_tag}^0"
       else
-        Utils.popen_read("git", "rev-parse", "origin/master").chomp
+        Utils.popen_read("git", "merge-base", "origin/master", end_commit).chomp
       end
       odie "Could not find start commit!" if start_commit.empty?
 
       start_commit = Utils.popen_read("git", "rev-parse", start_commit).chomp
       odie "Could not find start commit!" if start_commit.empty?
 
-      end_commit ||= "HEAD"
       end_commit = Utils.popen_read("git", "rev-parse", end_commit).chomp
       odie "Could not find end commit!" if end_commit.empty?
 
@@ -123,7 +114,7 @@ module Homebrew
       safe_system "git", "reset", "--hard", start_commit
 
       # update ENV["PATH"]
-      ENV["PATH"] = PATH.new(ENV["PATH"]).prepend(curdir/"bin")
+      ENV["PATH"] = PATH.new(ENV.fetch("PATH")).prepend(curdir/"bin")
 
       # run brew help to install portable-ruby (if needed)
       quiet_system "brew", "help"
@@ -147,4 +138,17 @@ module Homebrew
   ensure
     FileUtils.rm_rf "update-test" unless args.keep_tmp?
   end
+
+  def git_tags
+    tags = Utils.popen_read("git", "tag", "--list", "--sort=-version:refname")
+    if tags.blank?
+      tags = if (HOMEBREW_REPOSITORY/".git/shallow").exist?
+        safe_system "git", "fetch", "--tags", "--depth=1"
+        Utils.popen_read("git", "tag", "--list", "--sort=-version:refname")
+      end
+    end
+    tags
+  end
 end
+
+require "extend/os/dev-cmd/update-test"

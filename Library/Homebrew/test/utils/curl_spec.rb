@@ -4,7 +4,7 @@
 require "utils/curl"
 
 describe "Utils::Curl" do
-  let(:details) {
+  let(:details) do
     details = {
       normal:     {},
       cloudflare: {},
@@ -14,7 +14,7 @@ describe "Utils::Curl" do
     details[:normal][:no_cookie] = {
       url:            "https://www.example.com/",
       final_url:      nil,
-      status:         "403",
+      status_code:    "403",
       headers:        {
         "age"            => "123456",
         "cache-control"  => "max-age=604800",
@@ -35,7 +35,7 @@ describe "Utils::Curl" do
     }
 
     details[:normal][:ok] = Marshal.load(Marshal.dump(details[:normal][:no_cookie]))
-    details[:normal][:ok][:status] = "200"
+    details[:normal][:ok][:status_code] = "200"
 
     details[:normal][:single_cookie] = Marshal.load(Marshal.dump(details[:normal][:no_cookie]))
     details[:normal][:single_cookie][:headers]["set-cookie"] = "a_cookie=for_testing"
@@ -52,7 +52,7 @@ describe "Utils::Curl" do
     details[:cloudflare][:single_cookie] = {
       url:            "https://www.example.com/",
       final_url:      nil,
-      status:         "403",
+      status_code:    "403",
       headers:        {
         "date"            => "Wed, 1 Jan 2020 01:23:45 GMT",
         "content-type"    => "text/plain; charset=UTF-8",
@@ -62,8 +62,8 @@ describe "Utils::Curl" do
         "cache-control"   => "private, max-age=0, no-store, no-cache, must-revalidate, post-check=0, pre-check=0",
         "expires"         => "Thu, 01 Jan 1970 00:00:01 GMT",
         "expect-ct"       => "max-age=604800, report-uri=\"https://report-uri.cloudflare.com/cdn-cgi/beacon/expect-ct\"",
-        "set-cookie"      => "__cf_bm=0123456789abcdef; path=/; expires=Wed, 31-Jan-20 01:23:45 GMT;" \
-                             " domain=www.example.com; HttpOnly; Secure; SameSite=None",
+        "set-cookie"      => "__cf_bm=0123456789abcdef; path=/; expires=Wed, 31-Jan-20 01:23:45 GMT; " \
+                             "domain=www.example.com; HttpOnly; Secure; SameSite=None",
         "server"          => "cloudflare",
         "cf-ray"          => "0123456789abcdef-IAD",
         "alt-svc"         => "h3=\":443\"; ma=86400, h3-29=\":443\"; ma=86400",
@@ -77,8 +77,8 @@ describe "Utils::Curl" do
     details[:cloudflare][:multiple_cookies] = Marshal.load(Marshal.dump(details[:cloudflare][:single_cookie]))
     details[:cloudflare][:multiple_cookies][:headers]["set-cookie"] = [
       "first_cookie=for_testing",
-      "__cf_bm=abcdef0123456789; path=/; expires=Thu, 28-Apr-22 18:38:40 GMT; domain=www.example.com; HttpOnly;" \
-      " Secure; SameSite=None",
+      "__cf_bm=abcdef0123456789; path=/; expires=Thu, 28-Apr-22 18:38:40 GMT; domain=www.example.com; HttpOnly; " \
+      "Secure; SameSite=None",
       "last_cookie=also_for_testing",
     ]
 
@@ -111,17 +111,17 @@ describe "Utils::Curl" do
     ]
 
     details
-  }
+  end
 
-  let(:location_urls) {
+  let(:location_urls) do
     %w[
       https://example.com/example/
       https://example.com/example1/
       https://example.com/example2/
     ]
-  }
+  end
 
-  let(:response_hash) {
+  let(:response_hash) do
     response_hash = {}
 
     response_hash[:ok] = {
@@ -240,9 +240,9 @@ describe "Utils::Curl" do
     }
 
     response_hash
-  }
+  end
 
-  let(:response_text) {
+  let(:response_text) do
     response_text = {}
 
     response_text[:ok] = <<~EOS
@@ -279,9 +279,9 @@ describe "Utils::Curl" do
     )
 
     response_text
-  }
+  end
 
-  let(:body) {
+  let(:body) do
     body = {}
 
     body[:default] = <<~EOS
@@ -303,7 +303,7 @@ describe "Utils::Curl" do
     body[:with_http_status_line] = body[:default].sub("<html>", "HTTP/1.1 200\r\n<html>")
 
     body
-  }
+  end
 
   describe "curl_args" do
     let(:args) { ["foo"] }
@@ -554,6 +554,60 @@ describe "Utils::Curl" do
 
     it "returns nil when the response hash doesn't contain a location header" do
       expect(curl_response_last_location([response_hash[:ok]])).to be_nil
+    end
+  end
+
+  describe "#curl_response_follow_redirections" do
+    it "returns the original URL when there are no location headers" do
+      expect(
+        curl_response_follow_redirections(
+          [response_hash[:ok]],
+          "https://brew.sh/test1/test2",
+        ),
+      ).to eq("https://brew.sh/test1/test2")
+    end
+
+    it "returns the URL relative to base when locations are relative" do
+      expect(
+        curl_response_follow_redirections(
+          [response_hash[:redirection_root_relative], response_hash[:ok]],
+          "https://brew.sh/test1/test2",
+        ),
+      ).to eq("https://brew.sh/example/")
+
+      expect(
+        curl_response_follow_redirections(
+          [response_hash[:redirection_parent_relative], response_hash[:ok]],
+          "https://brew.sh/test1/test2",
+        ),
+      ).to eq("https://brew.sh/test1/example/")
+
+      expect(
+        curl_response_follow_redirections(
+          [
+            response_hash[:redirection_parent_relative],
+            response_hash[:redirection_parent_relative],
+            response_hash[:ok],
+          ],
+          "https://brew.sh/test1/test2",
+        ),
+      ).to eq("https://brew.sh/test1/example/example/")
+    end
+
+    it "returns new base when there are absolute location(s)" do
+      expect(
+        curl_response_follow_redirections(
+          [response_hash[:redirection], response_hash[:ok]],
+          "https://brew.sh/test1/test2",
+        ),
+      ).to eq(location_urls[0])
+
+      expect(
+        curl_response_follow_redirections(
+          [response_hash[:redirection], response_hash[:redirection_parent_relative], response_hash[:ok]],
+          "https://brew.sh/test1/test2",
+        ),
+      ).to eq("#{location_urls[0]}example/")
     end
   end
 end

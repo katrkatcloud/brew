@@ -1,12 +1,11 @@
-# typed: false
+# typed: true
 # frozen_string_literal: true
 
 require "cask/cask_loader"
 require "cask/config"
 require "cask/dsl"
 require "cask/metadata"
-require "searchable"
-require "api"
+require "utils/bottles"
 
 module Cask
   # An instance of a cask.
@@ -16,12 +15,59 @@ module Cask
     extend T::Sig
 
     extend Forwardable
-    extend Searchable
+    extend Predicable
     include Metadata
 
-    attr_reader :token, :sourcefile_path, :source, :config, :default_config
+    # Needs a leading slash to avoid `File.expand.path` complaining about non-absolute home.
+    HOME_PLACEHOLDER = "/$HOME"
+    HOMEBREW_PREFIX_PLACEHOLDER = "$HOMEBREW_PREFIX"
+    APPDIR_PLACEHOLDER = "$APPDIR"
+
+    # TODO: can be removed when API JSON is regenerated with HOMEBREW_PREFIX_PLACEHOLDER.
+    HOMEBREW_OLD_PREFIX_PLACEHOLDER = "$(brew --prefix)"
+
+    attr_reader :token, :sourcefile_path, :source, :config, :default_config, :loader
+    attr_accessor :download, :allow_reassignment
+
+    attr_predicate :loaded_from_api?
+
+    class << self
+      def generating_hash!
+        return if generating_hash?
+
+        # Apply monkeypatches for API generation
+        @old_homebrew_prefix = HOMEBREW_PREFIX
+        @old_home = Dir.home
+        Object.send(:remove_const, :HOMEBREW_PREFIX)
+        Object.const_set(:HOMEBREW_PREFIX, Pathname(HOMEBREW_PREFIX_PLACEHOLDER))
+        ENV["HOME"] = HOME_PLACEHOLDER
+
+        @generating_hash = true
+      end
+
+      def generated_hash!
+        return unless generating_hash?
+
+        # Revert monkeypatches for API generation
+        Object.send(:remove_const, :HOMEBREW_PREFIX)
+        Object.const_set(:HOMEBREW_PREFIX, @old_homebrew_prefix)
+        ENV["HOME"] = @old_home
+
+        @generating_hash = false
+      end
+
+      def generating_hash?
+        @generating_hash ||= false
+        @generating_hash == true
+      end
+    end
 
     def self.all
+      # TODO: ideally avoid using ARGV by moving to e.g. CLI::Parser
+      if ARGV.exclude?("--eval-all") && !Homebrew::EnvConfig.eval_all?
+        odeprecated "Cask::Cask#all without --all or HOMEBREW_EVAL_ALL"
+      end
+
       Tap.flat_map(&:cask_files).map do |f|
         CaskLoader::FromTapPathLoader.new(f).load(config: nil)
       rescue CaskUnreadableError => e
@@ -37,12 +83,30 @@ module Cask
       @tap
     end
 
-    def initialize(token, sourcefile_path: nil, source: nil, tap: nil, config: nil, &block)
+    sig {
+      params(
+        token:              String,
+        sourcefile_path:    T.nilable(Pathname),
+        source:             T.nilable(String),
+        tap:                T.nilable(Tap),
+        loaded_from_api:    T::Boolean,
+        config:             T.nilable(Config),
+        allow_reassignment: T::Boolean,
+        loader:             T.nilable(CaskLoader::ILoader),
+        block:              T.nilable(T.proc.bind(DSL).void),
+      ).void
+    }
+    def initialize(token, sourcefile_path: nil, source: nil, tap: nil, loaded_from_api: false,
+                   config: nil, allow_reassignment: false, loader: nil, &block)
       @token = token
       @sourcefile_path = sourcefile_path
       @source = source
       @tap = tap
-      @block = block
+      @allow_reassignment = allow_reassignment
+      @loaded_from_api = loaded_from_api
+      @loader = loader
+      # Sorbet has trouble with bound procs assigned to ivars: https://github.com/sorbet/sorbet/issues/6843
+      instance_variable_set(:@block, block)
 
       @default_config = config || Config.new
 
@@ -56,6 +120,10 @@ module Cask
     def config=(config)
       @config = config
 
+      refresh
+    end
+
+    def refresh
       @dsl = DSL.new(self)
       return unless @block
 
@@ -69,10 +137,11 @@ module Cask
 
     sig { returns(T::Array[[String, String]]) }
     def timestamped_versions
-      Pathname.glob(metadata_timestamped_path(version: "*", timestamp: "*"))
-              .map { |p| p.relative_path_from(p.parent.parent) }
-              .sort_by(&:basename) # sort by timestamp
-              .map { |p| p.split.map(&:to_s) }
+      relative_paths = Pathname.glob(metadata_timestamped_path(version: "*", timestamp: "*"))
+                               .map { |p| p.relative_path_from(p.parent.parent) }
+      # Sorbet is unaware that Pathname is sortable: https://github.com/sorbet/sorbet/issues/6844
+      T.unsafe(relative_paths).sort_by(&:basename) # sort by timestamp
+       .map { |p| p.split.map(&:to_s) }
     end
 
     def versions
@@ -83,19 +152,20 @@ module Cask
     end
 
     def os_versions
+      # TODO: use #to_hash_with_variations instead once all casks use on_system blocks
       @os_versions ||= begin
         version_os_hash = {}
         actual_version = MacOS.full_version.to_s
 
-        MacOS::Version::SYMBOLS.each do |os_name, os_version|
+        MacOSVersions::SYMBOLS.each do |os_name, os_version|
           MacOS.full_version = os_version
-          cask = CaskLoader.load(token)
+          cask = CaskLoader.load(full_name)
           version_os_hash[os_name] = cask.version if cask.version != version
         end
 
         version_os_hash
       ensure
-        MacOS.full_version = actual_version
+        MacOS.full_version = actual_version if actual_version
       end
     end
 
@@ -110,6 +180,12 @@ module Cask
       !versions.empty?
     end
 
+    # The caskfile is needed during installation when there are
+    # `*flight` blocks or the cask has multiple languages
+    def caskfile_only?
+      languages.any? || artifacts.any?(Artifact::AbstractFlightBlock)
+    end
+
     sig { returns(T.nilable(Time)) }
     def install_time
       _, time = timestamped_versions.last
@@ -120,11 +196,38 @@ module Cask
 
     def installed_caskfile
       installed_version = timestamped_versions.last
-      metadata_main_container_path.join(*installed_version, "Casks", "#{token}.rb")
+      caskfile_dir = metadata_main_container_path.join(*installed_version, "Casks")
+      return caskfile_dir.join("#{token}.json") if caskfile_dir.join("#{token}.json").exist?
+
+      caskfile_dir.join("#{token}.rb")
     end
 
     def config_path
       metadata_main_container_path/"config.json"
+    end
+
+    def checksumable?
+      DownloadStrategyDetector.detect(url.to_s, url.using) <= AbstractFileDownloadStrategy
+    end
+
+    def download_sha_path
+      metadata_main_container_path/"LATEST_DOWNLOAD_SHA256"
+    end
+
+    def new_download_sha
+      require "cask/installer"
+
+      # Call checksumable? before hashing
+      @new_download_sha ||= Installer.new(self, verify_download_integrity: false)
+                                     .download(quiet: true)
+                                     .instance_eval { |x| Digest::SHA256.file(x).hexdigest }
+    end
+
+    def outdated_download_sha?
+      return true unless checksumable?
+
+      current_download_sha = download_sha_path.read if download_sha_path.exist?
+      current_download_sha.blank? || current_download_sha != new_download_sha
     end
 
     def caskroom_path
@@ -140,29 +243,22 @@ module Cask
       # special case: tap version is not available
       return [] if version.nil?
 
-      if greedy || (greedy_latest && greedy_auto_updates) || (greedy_auto_updates && auto_updates)
-        return versions if version.latest?
-      elsif greedy_latest && version.latest?
-        return versions
-      elsif auto_updates
-        return []
-      end
+      if version.latest?
+        return versions if (greedy || greedy_latest) && outdated_download_sha?
 
-      latest_version = if Homebrew::EnvConfig.install_from_api? &&
-                          (latest_cask_version = Homebrew::API::Versions.latest_cask_version(token))
-        DSL::Version.new latest_cask_version.to_s
-      else
-        version
+        return []
+      elsif auto_updates && !greedy && !greedy_auto_updates
+        return []
       end
 
       installed = versions
       current   = installed.last
 
       # not outdated unless there is a different version on tap
-      return [] if current == latest_version
+      return [] if current == version
 
       # collect all installed versions that are different than tap version and return them
-      installed.reject { |v| v == latest_version }
+      installed.reject { |v| v == version }
     end
 
     def outdated_info(greedy, verbose, json, greedy_latest, greedy_auto_updates)
@@ -182,6 +278,28 @@ module Cask
       end
     end
 
+    def ruby_source_checksum
+      @ruby_source_checksum ||= {
+        "sha256" => Digest::SHA256.file(sourcefile_path).hexdigest,
+      }.freeze
+    end
+
+    def languages
+      @languages ||= @dsl.languages
+    end
+
+    def tap_git_head
+      @tap_git_head ||= tap&.git_head
+    end
+
+    def populate_from_api!(json_cask)
+      raise ArgumentError, "Expected cask to be loaded from the API" unless loaded_from_api?
+
+      @languages = json_cask[:languages]
+      @tap_git_head = json_cask[:tap_git_head]
+      @ruby_source_checksum = json_cask[:ruby_source_checksum].freeze
+    end
+
     def to_s
       @token
     end
@@ -196,58 +314,98 @@ module Cask
     alias == eql?
 
     def to_h
+      url_specs = url&.specs.dup
+      case url_specs&.dig(:user_agent)
+      when :default
+        url_specs.delete(:user_agent)
+      when Symbol
+        url_specs[:user_agent] = ":#{url_specs[:user_agent]}"
+      end
+
       {
-        "token"          => token,
-        "full_token"     => full_name,
-        "tap"            => tap&.name,
-        "name"           => name,
-        "desc"           => desc,
-        "homepage"       => homepage,
-        "url"            => url,
-        "appcast"        => appcast,
-        "version"        => version,
-        "versions"       => os_versions,
-        "installed"      => versions.last,
-        "outdated"       => outdated?,
-        "sha256"         => sha256,
-        "artifacts"      => artifacts.map(&method(:to_h_gsubs)),
-        "caveats"        => (to_h_string_gsubs(caveats) unless caveats.empty?),
-        "depends_on"     => depends_on,
-        "conflicts_with" => conflicts_with,
-        "container"      => container,
-        "auto_updates"   => auto_updates,
+        "token"                => token,
+        "full_token"           => full_name,
+        "tap"                  => tap&.name,
+        "name"                 => name,
+        "desc"                 => desc,
+        "homepage"             => homepage,
+        "url"                  => url,
+        "url_specs"            => url_specs,
+        "appcast"              => appcast,
+        "version"              => version,
+        "versions"             => os_versions,
+        "installed"            => versions.last,
+        "outdated"             => outdated?,
+        "sha256"               => sha256,
+        "artifacts"            => artifacts_list,
+        "caveats"              => (caveats unless caveats.empty?),
+        "depends_on"           => depends_on,
+        "conflicts_with"       => conflicts_with,
+        "container"            => container&.pairs,
+        "auto_updates"         => auto_updates,
+        "tap_git_head"         => tap_git_head,
+        "languages"            => languages,
+        "ruby_source_checksum" => ruby_source_checksum,
       }
+    end
+
+    def to_hash_with_variations
+      if loaded_from_api? && !Homebrew::EnvConfig.no_install_from_api?
+        return api_to_local_hash(Homebrew::API::Cask.all_casks[token])
+      end
+
+      hash = to_h
+      variations = {}
+
+      hash_keys_to_skip = %w[outdated installed versions]
+
+      if @dsl.on_system_blocks_exist?
+        [:arm, :intel].each do |arch|
+          MacOSVersions::SYMBOLS.each_key do |os_name|
+            bottle_tag = ::Utils::Bottles::Tag.new(system: os_name, arch: arch)
+            next unless bottle_tag.valid_combination?
+
+            Homebrew::SimulateSystem.os = os_name
+            Homebrew::SimulateSystem.arch = arch
+
+            refresh
+
+            to_h.each do |key, value|
+              next if hash_keys_to_skip.include? key
+              next if value.to_s == hash[key].to_s
+
+              variations[bottle_tag.to_sym] ||= {}
+              variations[bottle_tag.to_sym][key] = value
+            end
+          end
+        end
+      end
+
+      Homebrew::SimulateSystem.clear
+      refresh
+
+      hash["variations"] = variations
+      hash
     end
 
     private
 
-    def to_h_string_gsubs(string)
-      string.to_s
-            .gsub(ENV["HOME"], "$HOME")
-            .gsub(HOMEBREW_PREFIX, "$(brew --prefix)")
+    def api_to_local_hash(hash)
+      hash["token"] = token
+      hash["installed"] = versions.last
+      hash["outdated"] = outdated?
+      hash
     end
 
-    def to_h_array_gsubs(array)
-      array.to_a.map do |value|
-        to_h_gsubs(value)
-      end
-    end
-
-    def to_h_hash_gsubs(hash)
-      hash.to_h.transform_values do |value|
-        to_h_gsubs(value)
-      end
-    rescue TypeError
-      to_h_array_gsubs(hash)
-    end
-
-    def to_h_gsubs(value)
-      if value.respond_to? :to_h
-        to_h_hash_gsubs(value)
-      elsif value.respond_to? :to_a
-        to_h_array_gsubs(value)
-      else
-        to_h_string_gsubs(value)
+    def artifacts_list
+      artifacts.map do |artifact|
+        case artifact
+        when Artifact::AbstractFlightBlock
+          # Only indicate whether this block is used as we don't load it from the API
+          { artifact.summarize => nil }
+        else
+          { artifact.class.dsl_key => artifact.to_args }
+        end
       end
     end
   end

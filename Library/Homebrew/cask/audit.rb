@@ -1,4 +1,4 @@
-# typed: false
+# typed: true
 # frozen_string_literal: true
 
 require "cask/denylist"
@@ -20,67 +20,51 @@ module Cask
 
     attr_reader :cask, :download
 
-    attr_predicate :appcast?, :new_cask?, :strict?, :online?, :token_conflicts?
+    attr_predicate :appcast?, :new_cask?, :strict?, :signing?, :online?, :token_conflicts?
 
-    def initialize(cask, appcast: nil, download: nil, quarantine: nil,
-                   token_conflicts: nil, online: nil, strict: nil,
-                   new_cask: nil)
-
-      # `new_cask` implies `online` and `strict`
+    def initialize(
+      cask,
+      appcast: nil, download: nil, quarantine: nil,
+      token_conflicts: nil, online: nil, strict: nil, signing: nil,
+      new_cask: nil, only: [], except: []
+    )
+      # `new_cask` implies `online`, `token_conflicts`, `strict` and `signing`
       online = new_cask if online.nil?
       strict = new_cask if strict.nil?
+      signing = new_cask if signing.nil?
+      token_conflicts = new_cask if token_conflicts.nil?
 
       # `online` implies `appcast` and `download`
       appcast = online if appcast.nil?
       download = online if download.nil?
 
-      # `new_cask` implies `token_conflicts`
-      token_conflicts = new_cask if token_conflicts.nil?
+      # `signing` implies `download`
+      download = signing if download.nil?
 
       @cask = cask
       @appcast = appcast
       @download = Download.new(cask, quarantine: quarantine) if download
       @online = online
       @strict = strict
+      @signing = signing
       @new_cask = new_cask
       @token_conflicts = token_conflicts
+      @only = only || []
+      @except = except || []
     end
 
     def run!
-      check_denylist
-      check_reverse_migration
-      check_required_stanzas
-      check_version
-      check_sha256
-      check_desc
-      check_url
-      check_unnecessary_verified
-      check_missing_verified
-      check_no_match
-      check_generic_artifacts
-      check_token_valid
-      check_token_bad_words
-      check_token_conflicts
-      check_languages
-      check_download
-      check_https_availability
-      check_single_pre_postflight
-      check_single_uninstall_zap
-      check_untrusted_pkg
-      livecheck_result = check_livecheck_version
-      check_hosting_with_livecheck(livecheck_result: livecheck_result)
-      check_appcast_and_livecheck
-      check_latest_with_appcast_or_livecheck
-      check_latest_with_auto_updates
-      check_stanza_requires_uninstall
-      check_appcast_contains_version
-      check_gitlab_repository
-      check_gitlab_repository_archived
-      check_gitlab_prerelease_version
-      check_github_repository
-      check_github_repository_archived
-      check_github_prerelease_version
-      check_bitbucket_repository
+      only_audits = @only
+      except_audits = @except
+
+      private_methods.map(&:to_s).grep(/^audit_/).each do |audit_method_name|
+        name = audit_method_name.delete_prefix("audit_")
+        next if !only_audits.empty? && only_audits&.exclude?(name)
+        next if except_audits&.include?(name)
+
+        send(audit_method_name)
+      end
+
       self
     rescue => e
       odebug e, e.backtrace
@@ -96,24 +80,33 @@ module Cask
       @warnings ||= []
     end
 
+    sig { returns(T::Boolean) }
+    def errors?
+      errors.any?
+    end
+
+    sig { returns(T::Boolean) }
+    def warnings?
+      warnings.any?
+    end
+
+    sig { returns(T::Boolean) }
+    def success?
+      !(errors? || warnings?)
+    end
+
+    sig { params(message: T.nilable(String), location: T.nilable(String)).void }
     def add_error(message, location: nil)
       errors << ({ message: message, location: location })
     end
 
+    sig { params(message: T.nilable(String), location: T.nilable(String)).void }
     def add_warning(message, location: nil)
       if strict?
         add_error message, location: location
       else
         warnings << ({ message: message, location: location })
       end
-    end
-
-    def errors?
-      errors.any?
-    end
-
-    def warnings?
-      warnings.any?
     end
 
     def result
@@ -126,7 +119,7 @@ module Cask
       end
     end
 
-    sig { params(include_passed: T::Boolean, include_warnings: T::Boolean).returns(String) }
+    sig { params(include_passed: T::Boolean, include_warnings: T::Boolean).returns(T.nilable(String)) }
     def summary(include_passed: false, include_warnings: true)
       return if success? && !include_passed
       return if warnings? && !errors? && !include_warnings
@@ -146,13 +139,10 @@ module Cask
       summary.join("\n")
     end
 
-    def success?
-      !(errors? || warnings?)
-    end
-
     private
 
-    def check_untrusted_pkg
+    sig { void }
+    def audit_untrusted_pkg
       odebug "Auditing pkg stanza: allow_untrusted"
 
       return if @cask.sourcefile_path.nil?
@@ -166,7 +156,8 @@ module Cask
       add_error "allow_untrusted is not permitted in official Homebrew Cask taps"
     end
 
-    def check_stanza_requires_uninstall
+    sig { void }
+    def audit_stanza_requires_uninstall
       odebug "Auditing stanzas which require an uninstall"
 
       return if cask.artifacts.none? { |k| k.is_a?(Artifact::Pkg) || k.is_a?(Artifact::Installer) }
@@ -175,7 +166,8 @@ module Cask
       add_error "installer and pkg stanzas require an uninstall stanza"
     end
 
-    def check_single_pre_postflight
+    sig { void }
+    def audit_single_pre_postflight
       odebug "Auditing preflight and postflight stanzas"
 
       if cask.artifacts.count { |k| k.is_a?(Artifact::PreflightBlock) && k.directives.key?(:preflight) } > 1
@@ -191,12 +183,9 @@ module Cask
       add_error "only a single postflight stanza is allowed"
     end
 
-    def check_single_uninstall_zap
+    sig { void }
+    def audit_single_uninstall_zap
       odebug "Auditing single uninstall_* and zap stanzas"
-
-      if cask.artifacts.count { |k| k.is_a?(Artifact::Uninstall) } > 1
-        add_error "only a single uninstall stanza is allowed"
-      end
 
       count = cask.artifacts.count do |k|
         k.is_a?(Artifact::PreflightBlock) &&
@@ -217,7 +206,8 @@ module Cask
       add_error "only a single zap stanza is allowed"
     end
 
-    def check_required_stanzas
+    sig { void }
+    def audit_required_stanzas
       odebug "Auditing required stanzas"
       [:version, :sha256, :url, :homepage].each do |sym|
         add_error "a #{sym} stanza is required" unless cask.send(sym)
@@ -229,59 +219,80 @@ module Cask
       add_error "at least one activatable artifact stanza is required" if installable_artifacts.empty?
     end
 
-    def check_version
-      return unless cask.version
+    sig { void }
+    def audit_description
+      # Fonts seldom benefit from descriptions and requiring them disproportionately
+      # increases the maintenance burden.
+      return if cask.tap == "homebrew/cask-fonts"
 
-      check_no_string_version_latest
+      add_warning "Cask should have a description. Please add a `desc` stanza." if cask.desc.blank?
     end
 
-    def check_no_string_version_latest
-      odebug "Verifying version :latest does not appear as a string ('latest')"
+    sig { void }
+    def audit_version_special_characters
+      return unless cask.version
+
+      return if cask.version.latest?
+
+      raw_version = cask.version.raw_version
+      return if raw_version.exclude?(":") && raw_version.exclude?("/")
+
+      add_error "version should not contain colons or slashes"
+    end
+
+    sig { void }
+    def audit_no_string_version_latest
+      return unless cask.version
+
+      odebug "Auditing version :latest does not appear as a string ('latest')"
       return unless cask.version.raw_version == "latest"
 
       add_error "you should use version :latest instead of version 'latest'"
     end
 
-    def check_sha256
+    sig { void }
+    def audit_sha256_no_check_if_latest
       return unless cask.sha256
 
-      check_sha256_no_check_if_latest
-      check_sha256_no_check_if_unversioned
-      check_sha256_actually_256
-      check_sha256_invalid
-    end
-
-    def check_sha256_no_check_if_latest
-      odebug "Verifying sha256 :no_check with version :latest"
+      odebug "Auditing sha256 :no_check with version :latest"
       return unless cask.version.latest?
       return if cask.sha256 == :no_check
 
       add_error "you should use sha256 :no_check when version is :latest"
     end
 
-    def check_sha256_no_check_if_unversioned
+    sig { void }
+    def audit_sha256_no_check_if_unversioned
+      return unless cask.sha256
       return if cask.sha256 == :no_check
 
       add_error "Use `sha256 :no_check` when URL is unversioned." if cask.url&.unversioned?
     end
 
-    def check_sha256_actually_256
-      odebug "Verifying sha256 string is a legal SHA-256 digest"
+    sig { void }
+    def audit_sha256_actually_256
+      return unless cask.sha256
+
+      odebug "Auditing sha256 string is a legal SHA-256 digest"
       return unless cask.sha256.is_a?(Checksum)
       return if cask.sha256.length == 64 && cask.sha256[/^[0-9a-f]+$/i]
 
       add_error "sha256 string must be of 64 hexadecimal characters"
     end
 
-    def check_sha256_invalid
-      odebug "Verifying sha256 is not a known invalid value"
+    sig { void }
+    def audit_sha256_invalid
+      return unless cask.sha256
+
+      odebug "Auditing sha256 is not a known invalid value"
       empty_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
       return unless cask.sha256 == empty_sha256
 
       add_error "cannot use the sha256 for an empty string: #{empty_sha256}"
     end
 
-    def check_appcast_and_livecheck
+    sig { void }
+    def audit_appcast_and_livecheck
       return unless cask.appcast
 
       if cask.livecheckable?
@@ -291,14 +302,20 @@ module Cask
       end
     end
 
-    def check_latest_with_appcast_or_livecheck
+    sig { void }
+    def audit_latest_with_appcast_or_livecheck
       return unless cask.version.latest?
 
       add_error "Casks with an `appcast` should not use `version :latest`." if cask.appcast
-      add_error "Casks with a `livecheck` should not use `version :latest`." if cask.livecheckable?
+
+      return unless cask.livecheckable?
+      return if cask.livecheck.skip?
+
+      add_error "Casks with a `livecheck` should not use `version :latest`."
     end
 
-    def check_latest_with_auto_updates
+    sig { void }
+    def audit_latest_with_auto_updates
       return unless cask.version.latest?
       return unless cask.auto_updates
 
@@ -307,7 +324,9 @@ module Cask
 
     LIVECHECK_REFERENCE_URL = "https://docs.brew.sh/Cask-Cookbook#stanza-livecheck"
 
-    def check_hosting_with_livecheck(livecheck_result:)
+    sig { params(livecheck_result: T.any(NilClass, T::Boolean, Symbol)).void }
+    def audit_hosting_with_livecheck(livecheck_result: audit_livecheck_version)
+      return if cask.discontinued? || cask.version.latest?
       return if block_url_offline? || cask.appcast || cask.livecheckable?
       return if livecheck_result == :auto_detected
 
@@ -315,7 +334,6 @@ module Cask
 
       case cask.url.to_s
       when %r{sourceforge.net/(\S+)}
-        return if cask.version.latest?
         return unless online?
 
         add_error "Download is hosted on SourceForge, #{add_livecheck}"
@@ -326,24 +344,12 @@ module Cask
       end
     end
 
-    def check_desc
-      return if cask.desc.present?
-
-      # Fonts seldom benefit from descriptions and requiring them disproportionately increases the maintenance burden
-      return if cask.tap == "homebrew/cask-fonts"
-
-      add_warning "Cask should have a description. Please add a `desc` stanza."
-    end
-
-    def check_url
-      return unless cask.url
-
-      check_download_url_format
-    end
-
     SOURCEFORGE_OSDN_REFERENCE_URL = "https://docs.brew.sh/Cask-Cookbook#sourceforgeosdn-urls"
 
-    def check_download_url_format
+    sig { void }
+    def audit_download_url_format
+      return unless cask.url
+
       odebug "Auditing URL format"
       if bad_sourceforge_url?
         add_error "SourceForge URL format incorrect. See #{Formatter.url(SOURCEFORGE_OSDN_REFERENCE_URL)}"
@@ -352,83 +358,10 @@ module Cask
       end
     end
 
-    def bad_url_format?(regex, valid_formats_array)
-      return false unless cask.url.to_s.match?(regex)
-
-      valid_formats_array.none? { |format| cask.url.to_s =~ format }
-    end
-
-    def bad_sourceforge_url?
-      bad_url_format?(/sourceforge/,
-                      [
-                        %r{\Ahttps://sourceforge\.net/projects/[^/]+/files/latest/download\Z},
-                        %r{\Ahttps://downloads\.sourceforge\.net/(?!(project|sourceforge)/)},
-                      ])
-    end
-
-    def bad_osdn_url?
-      bad_url_format?(/osd/, [%r{\Ahttps?://([^/]+.)?dl\.osdn\.jp/}])
-    end
-
-    def homepage
-      URI(cask.homepage.to_s).host
-    end
-
-    def domain
-      URI(cask.url.to_s).host
-    end
-
-    def url_match_homepage?
-      host = cask.url.to_s
-      host_uri = URI(host)
-      host = if host.match?(/:\d/) && host_uri.port != 80
-        "#{host_uri.host}:#{host_uri.port}"
-      else
-        host_uri.host
-      end
-      home = homepage.downcase
-      if (split_host = host.split(".")).length >= 3
-        host = split_host[-2..].join(".")
-      end
-      if (split_home = homepage.split(".")).length >= 3
-        home = split_home[-2..].join(".")
-      end
-      host == home
-    end
-
-    def strip_url_scheme(url)
-      url.sub(%r{^[^:/]+://(www\.)?}, "")
-    end
-
-    def url_from_verified
-      strip_url_scheme(cask.url.verified)
-    end
-
-    def verified_matches_url?
-      url_domain, url_path = strip_url_scheme(cask.url.to_s).split("/", 2)
-      verified_domain, verified_path = url_from_verified.split("/", 2)
-
-      (url_domain == verified_domain || (verified_domain && url_domain&.end_with?(".#{verified_domain}"))) &&
-        (!verified_path || url_path&.start_with?(verified_path))
-    end
-
-    def verified_present?
-      cask.url.verified.present?
-    end
-
-    def file_url?
-      URI(cask.url.to_s).scheme == "file"
-    end
-
-    def block_url_offline?
-      return false if online?
-
-      cask.url.from_block?
-    end
-
     VERIFIED_URL_REFERENCE_URL = "https://docs.brew.sh/Cask-Cookbook#when-url-and-homepage-domains-differ-add-verified"
 
-    def check_unnecessary_verified
+    sig { void }
+    def audit_unnecessary_verified
       return if block_url_offline?
       return unless verified_present?
       return unless url_match_homepage?
@@ -439,7 +372,8 @@ module Cask
                 "See #{Formatter.url(VERIFIED_URL_REFERENCE_URL)}"
     end
 
-    def check_missing_verified
+    sig { void }
+    def audit_missing_verified
       return if block_url_offline?
       return if file_url?
       return if url_match_homepage?
@@ -450,7 +384,8 @@ module Cask
                 "See #{Formatter.url(VERIFIED_URL_REFERENCE_URL)}"
     end
 
-    def check_no_match
+    sig { void }
+    def audit_no_match
       return if block_url_offline?
       return unless verified_present?
       return if verified_matches_url?
@@ -460,7 +395,8 @@ module Cask
                 "See #{Formatter.url(VERIFIED_URL_REFERENCE_URL)}"
     end
 
-    def check_generic_artifacts
+    sig { void }
+    def audit_generic_artifacts
       cask.artifacts.select { |a| a.is_a?(Artifact::Artifact) }.each do |artifact|
         unless artifact.target.absolute?
           add_error "target must be absolute path for #{artifact.class.english_name} #{artifact.source}"
@@ -468,7 +404,8 @@ module Cask
       end
     end
 
-    def check_languages
+    sig { void }
+    def audit_languages
       @cask.languages.each do |language|
         Locale.parse(language)
       rescue Locale::ParserError
@@ -476,7 +413,8 @@ module Cask
       end
     end
 
-    def check_token_conflicts
+    sig { void }
+    def audit_token_conflicts
       return unless token_conflicts?
       return unless core_formula_names.include?(cask.token)
 
@@ -484,7 +422,8 @@ module Cask
                   "#{Formatter.url(core_formula_url)}"
     end
 
-    def check_token_valid
+    sig { void }
+    def audit_token_valid
       add_error "cask token contains non-ascii characters" unless cask.token.ascii_only?
       add_error "cask token + should be replaced by -plus-" if cask.token.include? "+"
       add_error "cask token whitespace should be replaced by hyphens" if cask.token.include? " "
@@ -492,7 +431,7 @@ module Cask
       add_error "cask token underscores should be replaced by hyphens" if cask.token.include? "_"
       add_error "cask token should not contain double hyphens" if cask.token.include? "--"
 
-      if cask.token.match?(/[^a-z0-9\-]/)
+      if cask.token.match?(/[^a-z0-9-]/)
         add_error "cask token should only contain lowercase alphanumeric characters and hyphens"
       end
 
@@ -501,17 +440,17 @@ module Cask
       add_error "cask token should not have leading or trailing hyphens"
     end
 
-    def check_token_bad_words
+    sig { void }
+    def audit_token_bad_words
       return unless new_cask?
 
       token = cask.token
 
       add_error "cask token contains .app" if token.end_with? ".app"
 
-      if /-(?<designation>alpha|beta|rc|release-candidate)$/ =~ cask.token &&
-         cask.tap&.official? &&
-         cask.tap != "homebrew/cask-versions"
-        add_error "cask token contains version designation '#{designation}'"
+      match_data = /-(?<designation>alpha|beta|rc|release-candidate)$/.match(cask.token)
+      if match_data && cask.tap&.official? && cask.tap != "homebrew/cask-versions"
+        add_error "cask token contains version designation '#{match_data[:designation]}'"
       end
 
       add_warning "cask token mentions launcher" if token.end_with? "launcher"
@@ -528,20 +467,8 @@ module Cask
       add_warning "cask token mentions framework"
     end
 
-    def core_tap
-      @core_tap ||= CoreTap.instance
-    end
-
-    def core_formula_names
-      core_tap.formula_names
-    end
-
-    sig { returns(String) }
-    def core_formula_url
-      "#{core_tap.default_remote}/blob/HEAD/Formula/#{cask.token}.rb"
-    end
-
-    def check_download
+    sig { void }
+    def audit_download
       return if download.blank? || cask.url.blank?
 
       odebug "Auditing download"
@@ -550,7 +477,90 @@ module Cask
       add_error "download not possible: #{e}"
     end
 
-    def check_livecheck_version
+    sig { void }
+    def audit_appcast_unneeded_long_version
+      return unless cask.livecheck.strategy == :sparkle
+      return unless cask.version.csv.second
+      return if cask.url.to_s.include? cask.version.csv.second
+      return if cask.version.csv.third.present? && cask.url.to_s.include?(cask.version.csv.third)
+
+      add_warning "Download does not require additional version components. Use `&:short_version` in the livecheck"
+    end
+
+    sig { void }
+    def audit_signing
+      return if !signing? || download.blank? || cask.url.blank?
+
+      odebug "Auditing signing"
+      artifacts = cask.artifacts.select { |k| k.is_a?(Artifact::Pkg) || k.is_a?(Artifact::App) }
+
+      return if artifacts.empty?
+
+      downloaded_path = download.fetch
+      primary_container = UnpackStrategy.detect(downloaded_path, type: @cask.container&.type, merge_xattrs: true)
+
+      return if primary_container.nil?
+
+      Dir.mktmpdir do |tmpdir|
+        tmpdir = Pathname(tmpdir)
+        primary_container.extract_nestedly(to: tmpdir, basename: downloaded_path.basename, verbose: false)
+
+        artifacts.each do |artifact|
+          case artifact
+          when Artifact::Moved
+            path = tmpdir/artifact.source.basename
+            next unless path.exist?
+
+            result = system_command("codesign", args: ["--verify", path], print_stderr: false)
+
+            next if result.success?
+
+            message = <<~EOS
+              Signature verification failed:
+              #{result.merged_output}
+              macOS on ARM requires applications to be signed.
+              Please contact the upstream developer to let them know they should
+            EOS
+
+            message = if result.stderr.include?("not signed at all")
+              "#{message} sign their app."
+            else
+              "#{message} fix the signature of their app."
+            end
+
+            add_warning message
+          when Artifact::Pkg
+            path = downloaded_path
+            next unless path.exist?
+
+            result = system_command("pkgutil", args: ["--check-signature", path], print_stderr: false)
+
+            unless result.success?
+              add_warning <<~EOS
+                Signature verification failed:
+                #{result.merged_output}
+                macOS on ARM requires applications to be signed.
+                Please contact the upstream developer to let them know they should sign their package.
+              EOS
+              next
+            end
+
+            result = system_command("stapler", args: ["validate", path], print_stderr: false)
+            next if result.success?
+
+            add_warning <<~EOS
+              Signature verification failed:
+              #{result.merged_output}
+              macOS on ARM requires applications to be signed.
+              Please contact the upstream developer to let them know they should notarize their package.
+            EOS
+          end
+        end
+      end
+    end
+
+    sig { returns(T.any(NilClass, T::Boolean, Symbol)) }
+    def audit_livecheck_version
       return unless appcast?
 
       referenced_cask, = Homebrew::Livecheck.resolve_livecheck_reference(cask)
@@ -587,7 +597,54 @@ module Cask
       false
     end
 
-    def check_appcast_contains_version
+    def audit_livecheck_min_os
+      return unless online?
+      return unless cask.livecheckable?
+      return unless cask.livecheck.strategy == :sparkle
+
+      out, _, status = curl_output("--fail", "--silent", "--location", cask.livecheck.url)
+      return unless status.success?
+
+      require "rexml/document"
+
+      xml = begin
+        REXML::Document.new(out)
+      rescue REXML::ParseException
+        nil
+      end
+
+      return if xml.blank?
+
+      item = xml.elements["//rss//channel//item"]
+      return if item.blank?
+
+      min_os = item.elements["sparkle:minimumSystemVersion"]&.text
+      min_os = "11" if min_os == "10.16"
+      return if min_os.blank?
+
+      begin
+        min_os_string = OS::Mac::Version.new(min_os).strip_patch
+      rescue MacOSVersionError
+        return
+      end
+
+      return if min_os_string <= HOMEBREW_MACOS_OLDEST_ALLOWED
+
+      cask_min_os = cask.depends_on.macos&.version
+
+      return if cask_min_os == min_os_string
+
+      min_os_symbol = if cask_min_os.present?
+        cask_min_os.to_sym.inspect
+      else
+        "no minimum OS version"
+      end
+      add_error "Upstream defined #{min_os_string.to_sym.inspect} as the minimum OS version " \
+                "and the cask defined #{min_os_symbol}"
+    end
+
+    sig { void }
+    def audit_appcast_contains_version
       return unless appcast?
       return if cask.appcast.to_s.empty?
       return if cask.appcast.must_contain == :no_check
@@ -613,7 +670,8 @@ module Cask
       EOS
     end
 
-    def check_github_prerelease_version
+    sig { void }
+    def audit_github_prerelease_version
       return if cask.tap == "homebrew/cask-versions"
 
       odebug "Auditing GitHub prerelease"
@@ -626,7 +684,8 @@ module Cask
       add_error error if error
     end
 
-    def check_gitlab_prerelease_version
+    sig { void }
+    def audit_gitlab_prerelease_version
       return if cask.tap == "homebrew/cask-versions"
 
       user, repo = get_repo_data(%r{https?://gitlab\.com/([^/]+)/([^/]+)/?.*}) if online?
@@ -640,7 +699,8 @@ module Cask
       add_error error if error
     end
 
-    def check_github_repository_archived
+    sig { void }
+    def audit_github_repository_archived
       user, repo = get_repo_data(%r{https?://github\.com/([^/]+)/([^/]+)/?.*}) if online?
       return if user.nil?
 
@@ -660,7 +720,8 @@ module Cask
       end
     end
 
-    def check_gitlab_repository_archived
+    sig { void }
+    def audit_gitlab_repository_archived
       user, repo = get_repo_data(%r{https?://gitlab\.com/([^/]+)/([^/]+)/?.*}) if online?
       return if user.nil?
 
@@ -680,7 +741,8 @@ module Cask
       end
     end
 
-    def check_github_repository
+    sig { void }
+    def audit_github_repository
       return unless new_cask?
 
       user, repo = get_repo_data(%r{https?://github\.com/([^/]+)/([^/]+)/?.*})
@@ -692,7 +754,8 @@ module Cask
       add_error error if error
     end
 
-    def check_gitlab_repository
+    sig { void }
+    def audit_gitlab_repository
       return unless new_cask?
 
       user, repo = get_repo_data(%r{https?://gitlab\.com/([^/]+)/([^/]+)/?.*})
@@ -704,7 +767,8 @@ module Cask
       add_error error if error
     end
 
-    def check_bitbucket_repository
+    sig { void }
+    def audit_bitbucket_repository
       return unless new_cask?
 
       user, repo = get_repo_data(%r{https?://bitbucket\.org/([^/]+)/([^/]+)/?.*})
@@ -716,6 +780,62 @@ module Cask
       add_error error if error
     end
 
+    sig { void }
+    def audit_denylist
+      return unless cask.tap
+      return unless cask.tap.official?
+      return unless (reason = Denylist.reason(cask.token))
+
+      add_error "#{cask.token} is not allowed: #{reason}"
+    end
+
+    sig { void }
+    def audit_reverse_migration
+      return unless new_cask?
+      return unless cask.tap
+      return unless cask.tap.official?
+      return unless cask.tap.tap_migrations.key?(cask.token)
+
+      add_error "#{cask.token} is listed in tap_migrations.json"
+    end
+
+    sig { void }
+    def audit_https_availability
+      return unless download
+
+      if cask.url && !cask.url.using
+        validate_url_for_https_availability(cask.url, "binary URL", cask.token, cask.tap,
+                                            user_agents: [cask.url.user_agent])
+      end
+
+      if cask.appcast && appcast?
+        validate_url_for_https_availability(cask.appcast, "appcast URL", cask.token, cask.tap, check_content: true)
+      end
+
+      return unless cask.homepage
+
+      validate_url_for_https_availability(cask.homepage, SharedAudits::URL_TYPE_HOMEPAGE, cask.token, cask.tap,
+                                          user_agents:   [:browser, :default],
+                                          check_content: true,
+                                          strict:        strict?)
+    end
+
+    # sig {
+    #   params(url_to_check: T.any(String, URL), url_type: String, cask_token: String, tap: Tap,
+    #          options: T.untyped).void
+    # }
+    def validate_url_for_https_availability(url_to_check, url_type, cask_token, tap, **options)
+      problem = curl_check_http_content(url_to_check.to_s, url_type, **options)
+      exception = tap&.audit_exception(:secure_connection_audit_skiplist, cask_token, url_to_check.to_s)
+
+      if problem
+        add_error problem unless exception
+      elsif exception
+        add_error "#{url_to_check} is in the secure connection audit skiplist but does not need to be skipped"
+      end
+    end
+
+    sig { params(regex: T.any(String, Regexp)).returns(T.nilable(T::Array[String])) }
     def get_repo_data(regex)
       return unless online?
 
@@ -729,52 +849,110 @@ module Cask
       [user, repo]
     end
 
-    def check_denylist
-      return unless cask.tap
-      return unless cask.tap.official?
-      return unless (reason = Denylist.reason(cask.token))
+    sig {
+      params(regex: T.any(String, Regexp), valid_formats_array: T::Array[T.any(String, Regexp)]).returns(T::Boolean)
+    }
+    def bad_url_format?(regex, valid_formats_array)
+      return false unless cask.url.to_s.match?(regex)
 
-      add_error "#{cask.token} is not allowed: #{reason}"
+      valid_formats_array.none? { |format| cask.url.to_s =~ format }
     end
 
-    def check_reverse_migration
-      return unless new_cask?
-      return unless cask.tap
-      return unless cask.tap.official?
-      return unless cask.tap.tap_migrations.key?(cask.token)
-
-      add_error "#{cask.token} is listed in tap_migrations.json"
+    sig { returns(T::Boolean) }
+    def bad_sourceforge_url?
+      bad_url_format?(/sourceforge/,
+                      [
+                        %r{\Ahttps://sourceforge\.net/projects/[^/]+/files/latest/download\Z},
+                        %r{\Ahttps://downloads\.sourceforge\.net/(?!(project|sourceforge)/)},
+                      ])
     end
 
-    def check_https_availability
-      return unless download
-
-      if cask.url && !cask.url.using
-        check_url_for_https_availability(cask.url, "binary URL", cask.token, cask.tap,
-                                         user_agents: [cask.url.user_agent])
-      end
-
-      if cask.appcast && appcast?
-        check_url_for_https_availability(cask.appcast, "appcast URL", cask.token, cask.tap, check_content: true)
-      end
-
-      return unless cask.homepage
-
-      check_url_for_https_availability(cask.homepage, "homepage URL", cask.token, cask.tap,
-                                       user_agents:   [:browser, :default],
-                                       check_content: true,
-                                       strict:        strict?)
+    sig { returns(T::Boolean) }
+    def bad_osdn_url?
+      bad_url_format?(/osd/, [%r{\Ahttps?://([^/]+.)?dl\.osdn\.jp/}])
     end
 
-    def check_url_for_https_availability(url_to_check, url_type, cask_token, tap, **options)
-      problem = curl_check_http_content(url_to_check.to_s, url_type, **options)
-      exception = tap&.audit_exception(:secure_connection_audit_skiplist, cask_token, url_to_check.to_s)
+    # sig { returns(String) }
+    def homepage
+      URI(cask.homepage.to_s).host
+    end
 
-      if problem
-        add_error problem unless exception
-      elsif exception
-        add_error "#{url_to_check} is in the secure connection audit skiplist but does not need to be skipped"
+    # sig { returns(String) }
+    def domain
+      URI(cask.url.to_s).host
+    end
+
+    sig { returns(T::Boolean) }
+    def url_match_homepage?
+      host = cask.url.to_s
+      host_uri = URI(host)
+      host = if host.match?(/:\d/) && host_uri.port != 80
+        "#{host_uri.host}:#{host_uri.port}"
+      else
+        host_uri.host
       end
+
+      return false if homepage.blank?
+
+      home = homepage.downcase
+      if (split_host = T.must(host).split(".")).length >= 3
+        host = T.must(split_host[-2..]).join(".")
+      end
+      if (split_home = homepage.split(".")).length >= 3
+        home = split_home[-2..].join(".")
+      end
+      host == home
+    end
+
+    # sig { params(url: String).returns(String) }
+    def strip_url_scheme(url)
+      url.sub(%r{^[^:/]+://(www\.)?}, "")
+    end
+
+    # sig { returns(String) }
+    def url_from_verified
+      strip_url_scheme(cask.url.verified)
+    end
+
+    sig { returns(T::Boolean) }
+    def verified_matches_url?
+      url_domain, url_path = strip_url_scheme(cask.url.to_s).split("/", 2)
+      verified_domain, verified_path = url_from_verified.split("/", 2)
+
+      (url_domain == verified_domain || (verified_domain && url_domain&.end_with?(".#{verified_domain}"))) &&
+        (!verified_path || url_path&.start_with?(verified_path))
+    end
+
+    sig { returns(T::Boolean) }
+    def verified_present?
+      cask.url.verified.present?
+    end
+
+    sig { returns(T::Boolean) }
+    def file_url?
+      URI(cask.url.to_s).scheme == "file"
+    end
+
+    sig { returns(T::Boolean) }
+    def block_url_offline?
+      return false if online?
+
+      cask.url.from_block?
+    end
+
+    sig { returns(Tap) }
+    def core_tap
+      @core_tap ||= CoreTap.instance
+    end
+
+    # sig { returns(T::Array[String]) }
+    def core_formula_names
+      core_tap.formula_names
+    end
+
+    sig { returns(String) }
+    def core_formula_url
+      "#{core_tap.default_remote}/blob/HEAD/Formula/#{cask.token}.rb"
     end
   end
 end

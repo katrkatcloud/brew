@@ -5,6 +5,7 @@ require "cask/auditor"
 
 describe Cask::Cmd::Audit, :cask do
   let(:cask) { Cask::Cask.new("cask") }
+  let(:cask_with_many_languages) { Cask::CaskLoader.load(cask_path("with-many-languages")) }
   let(:result) { { warnings: Set.new, errors: Set.new } }
 
   describe "selection of Casks to audit" do
@@ -21,8 +22,12 @@ describe Cask::Cmd::Audit, :cask do
       expect(Cask::CaskLoader).to receive(:load).with(cask_token, any_args).and_return(cask)
 
       expect(Cask::Auditor).to receive(:audit)
-        .with(cask, audit_new_cask: false, quarantine: true, any_named_args: true,
-              display_failures_only: false, display_passes: true)
+        .with(
+          cask,
+          audit_new_cask: false, quarantine: true, any_named_args: true,
+          display_failures_only: false, display_passes: true,
+          only: [], except: []
+        )
         .and_return(result)
 
       described_class.run(cask_token)
@@ -32,8 +37,12 @@ describe Cask::Cmd::Audit, :cask do
   it "does not pass anything if no flags are specified" do
     allow(Cask::CaskLoader).to receive(:load).and_return(cask)
     expect(Cask::Auditor).to receive(:audit)
-      .with(cask, audit_new_cask: false, quarantine: true, any_named_args: true,
-            display_failures_only: false, display_passes: true)
+      .with(
+        cask,
+        audit_new_cask: false, quarantine: true, any_named_args: true,
+        display_failures_only: false, display_passes: true,
+        only: [], except: []
+      )
       .and_return(result)
 
     described_class.run("casktoken")
@@ -42,8 +51,12 @@ describe Cask::Cmd::Audit, :cask do
   it "passes `audit_download` if the `--download` flag is specified" do
     allow(Cask::CaskLoader).to receive(:load).and_return(cask)
     expect(Cask::Auditor).to receive(:audit)
-      .with(cask, audit_download: true, audit_new_cask: false, quarantine: true, any_named_args: true,
-            display_failures_only: false, display_passes: true)
+      .with(
+        cask,
+        audit_download: true, audit_new_cask: false, quarantine: true, any_named_args: true,
+        display_failures_only: false, display_passes: true,
+        only: [], except: []
+      )
       .and_return(result)
 
     described_class.run("casktoken", "--download")
@@ -52,8 +65,12 @@ describe Cask::Cmd::Audit, :cask do
   it "passes `audit_token_conflicts` if the `--token-conflicts` flag is specified" do
     allow(Cask::CaskLoader).to receive(:load).and_return(cask)
     expect(Cask::Auditor).to receive(:audit)
-      .with(cask, audit_token_conflicts: true, audit_new_cask: false, quarantine: true, any_named_args: true,
-            display_failures_only: false, display_passes: true)
+      .with(
+        cask,
+        audit_token_conflicts: true, audit_new_cask: false, quarantine: true, any_named_args: true,
+        display_failures_only: false, display_passes: true,
+        only: [], except: []
+      )
       .and_return(result)
 
     described_class.run("casktoken", "--token-conflicts")
@@ -62,8 +79,12 @@ describe Cask::Cmd::Audit, :cask do
   it "passes `audit_strict` if the `--strict` flag is specified" do
     allow(Cask::CaskLoader).to receive(:load).and_return(cask)
     expect(Cask::Auditor).to receive(:audit)
-      .with(cask, audit_strict: true, audit_new_cask: false, quarantine: true, any_named_args: true,
-            display_failures_only: false, display_passes: true)
+      .with(
+        cask,
+        audit_strict: true, audit_new_cask: false, quarantine: true, any_named_args: true,
+        display_failures_only: false, display_passes: true,
+        only: [], except: []
+      )
       .and_return(result)
 
     described_class.run("casktoken", "--strict")
@@ -72,8 +93,12 @@ describe Cask::Cmd::Audit, :cask do
   it "passes `audit_online` if the `--online` flag is specified" do
     allow(Cask::CaskLoader).to receive(:load).and_return(cask)
     expect(Cask::Auditor).to receive(:audit)
-      .with(cask, audit_online: true, audit_new_cask: false, quarantine: true, any_named_args: true,
-            display_failures_only: false, display_passes: true)
+      .with(
+        cask,
+        audit_online: true, audit_new_cask: false, quarantine: true, any_named_args: true,
+        display_failures_only: false, display_passes: true,
+        only: [], except: []
+      )
       .and_return(result)
 
     described_class.run("casktoken", "--online")
@@ -82,8 +107,12 @@ describe Cask::Cmd::Audit, :cask do
   it "passes `audit_new_cask` if the `--new-cask` flag is specified" do
     allow(Cask::CaskLoader).to receive(:load).and_return(cask)
     expect(Cask::Auditor).to receive(:audit)
-      .with(cask, audit_new_cask: true, quarantine: true, any_named_args: true,
-            display_failures_only: false, display_passes: true)
+      .with(
+        cask,
+        audit_new_cask: true, quarantine: true, any_named_args: true,
+        display_failures_only: false, display_passes: true,
+        only: [], except: []
+      )
       .and_return(result)
 
     described_class.run("casktoken", "--new-cask")
@@ -92,8 +121,12 @@ describe Cask::Cmd::Audit, :cask do
   it "passes `language` if the `--language` flag is specified" do
     allow(Cask::CaskLoader).to receive(:load).and_return(cask)
     expect(Cask::Auditor).to receive(:audit)
-      .with(cask, audit_new_cask: false, quarantine: true, language: ["de-AT"], any_named_args: true,
-            display_failures_only: false, display_passes: true)
+      .with(
+        cask,
+        audit_new_cask: false, quarantine: true, language: ["de-AT"], any_named_args: true,
+        display_failures_only: false, display_passes: true,
+        only: [], except: []
+      )
       .and_return(result)
 
     described_class.run("casktoken", "--language=de-AT")
@@ -102,8 +135,12 @@ describe Cask::Cmd::Audit, :cask do
   it "passes `quarantine` if the `--no-quarantine` flag is specified" do
     allow(Cask::CaskLoader).to receive(:load).and_return(cask)
     expect(Cask::Auditor).to receive(:audit)
-      .with(cask, audit_new_cask: false, quarantine: false, any_named_args: true,
-            display_failures_only: false, display_passes: true)
+      .with(
+        cask,
+        audit_new_cask: false, quarantine: false, any_named_args: true,
+        display_failures_only: false, display_passes: true,
+        only: [], except: []
+      )
       .and_return(result)
 
     described_class.run("casktoken", "--no-quarantine")
@@ -114,10 +151,21 @@ describe Cask::Cmd::Audit, :cask do
 
     allow(Cask::CaskLoader).to receive(:load).and_return(cask)
     expect(Cask::Auditor).to receive(:audit)
-      .with(cask, audit_new_cask: false, quarantine: false, any_named_args: true,
-            display_failures_only: false, display_passes: true)
+      .with(
+        cask,
+        audit_new_cask: false, quarantine: false, any_named_args: true,
+        display_failures_only: false, display_passes: true,
+        only: [], except: []
+      )
       .and_return(result)
 
     described_class.run("casktoken")
+  end
+
+  it "audits a sample of language when cask contains more than 10 languages" do
+    allow(Cask::CaskLoader).to receive(:load).and_return(cask_with_many_languages)
+    expect do
+      described_class.run("with-many-languages")
+    end.to output(/==> auditing a sample of available languages/im).to_stdout
   end
 end

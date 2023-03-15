@@ -10,6 +10,7 @@ describe CurlDownloadStrategy do
   let(:url) { "https://example.com/foo.tar.gz" }
   let(:version) { "1.2.3" }
   let(:specs) { { user: "download:123456" } }
+  let(:artifact_domain) { nil }
 
   it "parses the opts and sets the corresponding args" do
     expect(strategy.send(:_curl_args)).to eq(["--user", "download:123456"])
@@ -17,6 +18,8 @@ describe CurlDownloadStrategy do
 
   describe "#fetch" do
     before do
+      allow(Homebrew::EnvConfig).to receive(:artifact_domain).and_return(artifact_domain)
+
       strategy.temporary_path.dirname.mkpath
       FileUtils.touch strategy.temporary_path
     end
@@ -39,12 +42,13 @@ describe CurlDownloadStrategy do
       let(:specs) { { user_agent: "Mozilla/25.0.1" } }
 
       it "adds the appropriate curl args" do
-        expect(strategy).to receive(:system_command).with(
-          /curl/,
-          hash_including(args: array_including_cons("--user-agent", "Mozilla/25.0.1")),
-        )
-        .at_least(:once)
-        .and_return(instance_double(SystemCommand::Result, success?: true, stdout: "", assert_success!: nil))
+        expect(strategy).to receive(:system_command)
+          .with(
+            /curl/,
+            hash_including(args: array_including_cons("--user-agent", "Mozilla/25.0.1")),
+          )
+          .at_least(:once)
+          .and_return(instance_double(SystemCommand::Result, success?: true, stdout: "", assert_success!: nil))
 
         strategy.fetch
       end
@@ -56,37 +60,39 @@ describe CurlDownloadStrategy do
       let(:specs) { { user_agent: :fake } }
 
       it "adds the appropriate curl args" do
-        expect(strategy).to receive(:system_command).with(
-          /curl/,
-          hash_including(args: array_including_cons(
-            "--user-agent",
-            a_string_matching(/Mozilla.*Mac OS X 10.*AppleWebKit/),
-          )),
-        )
-        .at_least(:once)
-        .and_return(instance_double(SystemCommand::Result, success?: true, stdout: "", assert_success!: nil))
+        expect(strategy).to receive(:system_command)
+          .with(
+            /curl/,
+            hash_including(args: array_including_cons(
+              "--user-agent",
+              a_string_matching(/Mozilla.*Mac OS X 10.*AppleWebKit/),
+            )),
+          )
+          .at_least(:once)
+          .and_return(instance_double(SystemCommand::Result, success?: true, stdout: "", assert_success!: nil))
 
         strategy.fetch
       end
     end
 
     context "with cookies set" do
-      let(:specs) {
+      let(:specs) do
         {
           cookies: {
             coo: "k/e",
             mon: "ster",
           },
         }
-      }
+      end
 
       it "adds the appropriate curl args and does not URL-encode the cookies" do
-        expect(strategy).to receive(:system_command).with(
-          /curl/,
-          hash_including(args: array_including_cons("-b", "coo=k/e;mon=ster")),
-        )
-        .at_least(:once)
-        .and_return(instance_double(SystemCommand::Result, success?: true, stdout: "", assert_success!: nil))
+        expect(strategy).to receive(:system_command)
+          .with(
+            /curl/,
+            hash_including(args: array_including_cons("-b", "coo=k/e;mon=ster")),
+          )
+          .at_least(:once)
+          .and_return(instance_double(SystemCommand::Result, success?: true, stdout: "", assert_success!: nil))
 
         strategy.fetch
       end
@@ -96,12 +102,13 @@ describe CurlDownloadStrategy do
       let(:specs) { { referer: "https://somehost/also" } }
 
       it "adds the appropriate curl args" do
-        expect(strategy).to receive(:system_command).with(
-          /curl/,
-          hash_including(args: array_including_cons("-e", "https://somehost/also")),
-        )
-        .at_least(:once)
-        .and_return(instance_double(SystemCommand::Result, success?: true, stdout: "", assert_success!: nil))
+        expect(strategy).to receive(:system_command)
+          .with(
+            /curl/,
+            hash_including(args: array_including_cons("-e", "https://somehost/also")),
+          )
+          .at_least(:once)
+          .and_return(instance_double(SystemCommand::Result, success?: true, stdout: "", assert_success!: nil))
 
         strategy.fetch
       end
@@ -113,14 +120,71 @@ describe CurlDownloadStrategy do
       let(:specs) { { headers: ["foo", "bar"] } }
 
       it "adds the appropriate curl args" do
-        expect(strategy).to receive(:system_command).with(
-          /curl/,
-          hash_including(args: array_including_cons("--header", "foo").and(array_including_cons("--header", "bar"))),
-        )
-        .at_least(:once)
-        .and_return(instance_double(SystemCommand::Result, success?: true, stdout: "", assert_success!: nil))
+        expect(strategy).to receive(:system_command)
+          .with(
+            /curl/,
+            hash_including(
+              args: array_including_cons("--header", "foo").and(array_including_cons("--header", "bar")),
+            ),
+          )
+          .at_least(:once)
+          .and_return(instance_double(SystemCommand::Result, success?: true, stdout: "", assert_success!: nil))
 
         strategy.fetch
+      end
+    end
+
+    context "with artifact_domain set" do
+      let(:artifact_domain) { "https://mirror.example.com/oci" }
+
+      context "with an asset hosted under example.com" do
+        it "leaves the URL unchanged" do
+          expect(strategy).to receive(:system_command)
+            .with(
+              /curl/,
+              hash_including(args: array_including_cons(url)),
+            )
+            .at_least(:once)
+            .and_return(instance_double(SystemCommand::Result, success?: true, stdout: "", assert_success!: nil))
+
+          strategy.fetch
+        end
+      end
+
+      context "with an asset hosted under #{GitHubPackages::URL_DOMAIN} (HTTP)" do
+        let(:resource_path) { "v2/homebrew/core/spec/manifests/0.0" }
+        let(:url) { "http://#{GitHubPackages::URL_DOMAIN}/#{resource_path}" }
+        let(:status) { instance_double(Process::Status, success?: true, exitstatus: 0) }
+
+        it "rewrites the URL correctly" do
+          expect(strategy).to receive(:system_command)
+            .with(
+              /curl/,
+              hash_including(args: array_including_cons("#{artifact_domain}/#{resource_path}")),
+            )
+            .at_least(:once)
+            .and_return(SystemCommand::Result.new(["curl"], [""], status, secrets: []))
+
+          strategy.fetch
+        end
+      end
+
+      context "with an asset hosted under #{GitHubPackages::URL_DOMAIN} (HTTPS)" do
+        let(:resource_path) { "v2/homebrew/core/spec/manifests/0.0" }
+        let(:url) { "https://#{GitHubPackages::URL_DOMAIN}/#{resource_path}" }
+        let(:status) { instance_double(Process::Status, success?: true, exitstatus: 0) }
+
+        it "rewrites the URL correctly" do
+          expect(strategy).to receive(:system_command)
+            .with(
+              /curl/,
+              hash_including(args: array_including_cons("#{artifact_domain}/#{resource_path}")),
+            )
+            .at_least(:once)
+            .and_return(SystemCommand::Result.new(["curl"], [""], status, secrets: []))
+
+          strategy.fetch
+        end
       end
     end
   end

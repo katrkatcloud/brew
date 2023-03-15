@@ -46,7 +46,8 @@ module Homebrew
 
           return true if symlink? && !exist?
 
-          mtime < days.days.ago && ctime < days.days.ago
+          days_ago = (DateTime.now - days).to_time
+          mtime < days_ago && ctime < days_ago
         end
 
         def stale?(scrub: false)
@@ -125,8 +126,8 @@ module Homebrew
           return true if scrub && cask.versions.exclude?(cask.version)
 
           if cask.version.latest?
-            return mtime < CLEANUP_DEFAULT_DAYS.days.ago &&
-                   ctime < CLEANUP_DEFAULT_DAYS.days.ago
+            cleanup_threshold = (DateTime.now - CLEANUP_DEFAULT_DAYS).to_time
+            return mtime < cleanup_threshold && ctime < cleanup_threshold
           end
 
           false
@@ -154,37 +155,46 @@ module Homebrew
       @cleaned_up_paths = Set.new
     end
 
-    def self.install_formula_clean!(f, dry_run: false)
+    def self.install_formula_clean!(formula, dry_run: false)
       return if Homebrew::EnvConfig.no_install_cleanup?
+      return unless formula.latest_version_installed?
+      return if skip_clean_formula?(formula)
 
-      cleanup = Cleanup.new(dry_run: dry_run)
-      if cleanup.periodic_clean_due?
-        cleanup.periodic_clean!
-      elsif f.latest_version_installed? && !cleanup.skip_clean_formula?(f)
-        ohai "Running `brew cleanup #{f}`..."
-        puts_no_install_cleanup_disable_message_if_not_already!
-        cleanup.cleanup_formula(f)
+      if dry_run
+        ohai "Would run `brew cleanup #{formula}`"
+      else
+        ohai "Running `brew cleanup #{formula}`..."
       end
+
+      puts_no_install_cleanup_disable_message_if_not_already!
+      return if dry_run
+
+      Cleanup.new.cleanup_formula(formula)
     end
 
-    def self.puts_no_install_cleanup_disable_message_if_not_already!
+    def self.puts_no_install_cleanup_disable_message
       return if Homebrew::EnvConfig.no_env_hints?
       return if Homebrew::EnvConfig.no_install_cleanup?
-      return if @puts_no_install_cleanup_disable_message_if_not_already
 
       puts "Disable this behaviour by setting HOMEBREW_NO_INSTALL_CLEANUP."
       puts "Hide these hints with HOMEBREW_NO_ENV_HINTS (see `man brew`)."
+    end
+
+    def self.puts_no_install_cleanup_disable_message_if_not_already!
+      return if @puts_no_install_cleanup_disable_message_if_not_already
+
+      puts_no_install_cleanup_disable_message
       @puts_no_install_cleanup_disable_message_if_not_already = true
     end
 
-    def skip_clean_formula?(f)
+    def self.skip_clean_formula?(formula)
       return false if Homebrew::EnvConfig.no_cleanup_formulae.blank?
 
-      skip_clean_formulae = Homebrew::EnvConfig.no_cleanup_formulae.split(",")
-      skip_clean_formulae.include?(f.name) || (skip_clean_formulae & f.aliases).present?
+      @skip_clean_formulae ||= Homebrew::EnvConfig.no_cleanup_formulae.split(",")
+      @skip_clean_formulae.include?(formula.name) || (@skip_clean_formulae & formula.aliases).present?
     end
 
-    def periodic_clean_due?
+    def self.periodic_clean_due?
       return false if Homebrew::EnvConfig.no_install_cleanup?
 
       unless PERIODIC_CLEAN_FILE.exist?
@@ -193,35 +203,40 @@ module Homebrew
         return false
       end
 
-      PERIODIC_CLEAN_FILE.mtime < CLEANUP_DEFAULT_DAYS.days.ago
+      PERIODIC_CLEAN_FILE.mtime < (DateTime.now - CLEANUP_DEFAULT_DAYS).to_time
     end
 
-    def periodic_clean!
-      return false unless periodic_clean_due?
+    def self.periodic_clean!(dry_run: false)
+      return if Homebrew::EnvConfig.no_install_cleanup?
+      return unless periodic_clean_due?
 
-      if dry_run?
-        ohai "Would run `brew cleanup` which has not been run in the last #{CLEANUP_DEFAULT_DAYS} days"
+      if dry_run
+        oh1 "Would run `brew cleanup` which has not been run in the last #{CLEANUP_DEFAULT_DAYS} days"
       else
-        ohai "`brew cleanup` has not been run in the last #{CLEANUP_DEFAULT_DAYS} days, running now..."
+        oh1 "`brew cleanup` has not been run in the last #{CLEANUP_DEFAULT_DAYS} days, running now..."
       end
 
-      Cleanup.puts_no_install_cleanup_disable_message_if_not_already!
-      return if dry_run?
+      puts_no_install_cleanup_disable_message
+      return if dry_run
 
-      clean!(quiet: true, periodic: true)
+      Cleanup.new.clean!(quiet: true, periodic: true)
     end
 
     def clean!(quiet: false, periodic: false)
       if args.empty?
         Formula.installed
                .sort_by(&:name)
-               .reject { |f| skip_clean_formula?(f) }
+               .reject { |f| Cleanup.skip_clean_formula?(f) }
                .each do |formula|
           cleanup_formula(formula, quiet: quiet, ds_store: false, cache_db: false)
         end
+
+        Cleanup.autoremove(dry_run: dry_run?) if Homebrew::EnvConfig.autoremove?
+
         cleanup_cache
         cleanup_logs
         cleanup_lockfiles
+        cleanup_python_site_packages
         prune_prefix_symlinks_and_directories
 
         unless dry_run?
@@ -253,7 +268,7 @@ module Homebrew
             nil
           end
 
-          if formula && skip_clean_formula?(formula)
+          if formula && Cleanup.skip_clean_formula?(formula)
             onoe "Refusing to clean #{formula} because it is listed in " \
                  "#{Tty.bold}HOMEBREW_NO_CLEANUP_FORMULAE#{Tty.reset}!"
           elsif formula
@@ -293,11 +308,7 @@ module Homebrew
     def cleanup_logs
       return unless HOMEBREW_LOGS.directory?
 
-      logs_days = if days > CLEANUP_DEFAULT_DAYS
-        CLEANUP_DEFAULT_DAYS
-      else
-        days
-      end
+      logs_days = [days, CLEANUP_DEFAULT_DAYS].min
 
       HOMEBREW_LOGS.subdirs.each do |dir|
         cleanup_path(dir) { dir.rmtree } if dir.prune?(logs_days)
@@ -391,31 +402,14 @@ module Homebrew
     end
 
     def cleanup_portable_ruby
-      rubies = [which("ruby"), which("ruby", ENV["HOMEBREW_PATH"])].compact
-      system_ruby = Pathname.new("/usr/bin/ruby")
-      rubies << system_ruby if system_ruby.exist?
-
-      use_system_ruby = if Homebrew::EnvConfig.force_vendor_ruby?
-        false
-      elsif OS.mac?
-        ENV["HOMEBREW_MACOS_SYSTEM_RUBY_NEW_ENOUGH"].present?
-      else
-        check_ruby_version = HOMEBREW_LIBRARY_PATH/"utils/ruby_check_version_script.rb"
-        rubies.uniq.any? do |ruby|
-          quiet_system ruby, "--enable-frozen-string-literal", "--disable=gems,did_you_mean,rubyopt",
-                       check_ruby_version, HOMEBREW_REQUIRED_RUBY_VERSION
-        end
-      end
-
       vendor_dir = HOMEBREW_LIBRARY/"Homebrew/vendor"
       portable_ruby_latest_version = (vendor_dir/"portable-ruby-version").read.chomp
 
       portable_rubies_to_remove = []
       Pathname.glob(vendor_dir/"portable-ruby/*.*").select(&:directory?).each do |path|
-        next if !use_system_ruby && portable_ruby_latest_version == path.basename.to_s
+        next if !use_system_ruby? && portable_ruby_latest_version == path.basename.to_s
 
         portable_rubies_to_remove << path
-        puts "Would remove: #{path} (#{path.abv})" if dry_run?
       end
 
       return if portable_rubies_to_remove.empty?
@@ -427,20 +421,18 @@ module Homebrew
         puts Utils.popen_read("git", "-C", HOMEBREW_REPOSITORY, "clean", "-ffqx", bundler_path).chomp
       end
 
-      return if dry_run?
-
-      FileUtils.rm_rf portable_rubies_to_remove
+      portable_rubies_to_remove.each do |portable_ruby|
+        cleanup_path(portable_ruby) { portable_ruby.rmtree }
+      end
     end
+
+    def use_system_ruby?; end
 
     def cleanup_bootsnap
       bootsnap = cache/"bootsnap"
       return unless bootsnap.exist?
 
-      if dry_run?
-        puts "Would remove: #{bootsnap} (#{bootsnap.abv})"
-      else
-        FileUtils.rm_rf bootsnap
-      end
+      cleanup_path(bootsnap) { bootsnap.rmtree }
     end
 
     def cleanup_cache_db(rack = nil)
@@ -474,6 +466,55 @@ module Homebrew
             # don't care if we can't delete a .DS_Store
             nil
           end
+    end
+
+    def cleanup_python_site_packages
+      pyc_files = Hash.new { |h, k| h[k] = [] }
+      seen_non_pyc_file = Hash.new { |h, k| h[k] = false }
+      unused_pyc_files = []
+
+      HOMEBREW_PREFIX.glob("lib/python*/site-packages").each do |site_packages|
+        site_packages.each_child do |child|
+          next unless child.directory?
+          # TODO: Work out a sensible way to clean up pip's, setuptools', and wheel's
+          #       {dist,site}-info directories. Alternatively, consider always removing
+          #       all `-info` directories, because we may not be making use of them.
+          next if child.basename.to_s.end_with?("-info")
+
+          # Clean up old *.pyc files in the top-level __pycache__.
+          if child.basename.to_s == "__pycache__"
+            child.find do |path|
+              next unless path.extname == ".pyc"
+              next unless path.prune?(days)
+
+              unused_pyc_files << path
+            end
+
+            next
+          end
+
+          # Look for directories that contain only *.pyc files.
+          child.find do |path|
+            next if path.directory?
+
+            if path.extname == ".pyc"
+              pyc_files[child] << path
+            else
+              seen_non_pyc_file[child] = true
+              break
+            end
+          end
+        end
+      end
+
+      unused_pyc_files += pyc_files.reject { |k,| seen_non_pyc_file[k] }
+                                   .values
+                                   .flatten
+      return if unused_pyc_files.blank?
+
+      unused_pyc_files.each do |pyc|
+        cleanup_path(pyc) { pyc.unlink }
+      end
     end
 
     def prune_prefix_symlinks_and_directories
@@ -519,5 +560,43 @@ module Homebrew
       print "and #{d} directories " if d.positive?
       puts "from #{HOMEBREW_PREFIX}"
     end
+
+    def self.autoremove(dry_run: false)
+      require "utils/autoremove"
+      require "cask/caskroom"
+
+      # If this runs after install, uninstall, reinstall or upgrade,
+      # the cache of installed formulae may no longer be valid.
+      Formula.clear_cache unless dry_run
+
+      formulae = Formula.installed
+      # Remove formulae listed in HOMEBREW_NO_CLEANUP_FORMULAE and their dependencies.
+      if Homebrew::EnvConfig.no_cleanup_formulae.present?
+        formulae -= formulae.select(&method(:skip_clean_formula?))
+                            .flat_map { |f| [f, *f.runtime_formula_dependencies] }
+      end
+      casks = Cask::Caskroom.casks
+
+      removable_formulae = Utils::Autoremove.removable_formulae(formulae, casks)
+
+      return if removable_formulae.blank?
+
+      formulae_names = removable_formulae.map(&:full_name).sort
+
+      verb = dry_run ? "Would autoremove" : "Autoremoving"
+      oh1 "#{verb} #{formulae_names.count} unneeded #{Utils.pluralize("formula", formulae_names.count, plural: "e")}:"
+      puts formulae_names.join("\n")
+      return if dry_run
+
+      require "uninstall"
+
+      kegs_by_rack = removable_formulae.map(&:any_installed_keg).group_by(&:rack)
+      Uninstall.uninstall_kegs(kegs_by_rack)
+
+      # The installed formula cache will be invalid after uninstalling.
+      Formula.clear_cache
+    end
   end
 end
+
+require "extend/os/cleanup"

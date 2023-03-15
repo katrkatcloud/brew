@@ -1,4 +1,4 @@
-# typed: false
+# typed: true
 # frozen_string_literal: true
 
 require "cli/parser"
@@ -22,14 +22,14 @@ module Homebrew
       flag   "--with-label=",
              description: "Pull requests must have this label."
       comma_array "--without-labels",
-                  description: "Pull requests must not have these labels (default: "\
+                  description: "Pull requests must not have these labels (default: " \
                                "`do not merge`, `new formula`, `automerge-skip`)."
       switch "--without-approval",
              description: "Pull requests do not require approval to be merged."
       switch "--publish",
              description: "Run `brew pr-publish` on matching pull requests."
       switch "--no-autosquash",
-             description: "Instruct `brew pr-publish` to skip automatically reformatting and rewording commits "\
+             description: "Instruct `brew pr-publish` to skip automatically reformatting and rewording commits " \
                           "in the pull request to the preferred format."
       switch "--ignore-failures",
              description: "Include pull requests that have failing status checks."
@@ -61,7 +61,7 @@ module Homebrew
       return
     end
 
-    ohai "#{prs.count} matching pull #{"request".pluralize(prs.count)}:"
+    ohai "#{prs.count} matching pull #{Utils.pluralize("request", prs.count)}:"
     pr_urls = []
     prs.each do |pr|
       puts "#{tap.full_name unless tap.core_tap?}##{pr["number"]}: #{pr["title"]}"

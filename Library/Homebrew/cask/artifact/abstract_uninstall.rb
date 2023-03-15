@@ -1,4 +1,4 @@
-# typed: false
+# typed: true
 # frozen_string_literal: true
 
 require "timeout"
@@ -40,13 +40,16 @@ module Cask
       def initialize(cask, directives)
         directives.assert_valid_keys!(*ORDERED_DIRECTIVES)
 
-        super(cask)
+        super(cask, **directives)
         directives[:signal] = Array(directives[:signal]).flatten.each_slice(2).to_a
         @directives = directives
 
+        # This is already included when loading from the API.
+        return if cask.loaded_from_api?
         return unless directives.key?(:kext)
 
         cask.caveats do
+          T.bind(self, ::Cask::DSL::Caveats)
           kext
         end
       end
@@ -55,7 +58,7 @@ module Cask
         directives.to_h
       end
 
-      sig { returns(String) }
+      sig { override.returns(String) }
       def summarize
         to_h.flat_map { |key, val| Array(val).map { |v| "#{key.inspect} => #{v.inspect}" } }.join(", ")
       end
@@ -90,7 +93,21 @@ module Cask
       # :launchctl must come before :quit/:signal for cases where app would instantly re-launch
       def uninstall_launchctl(*services, command: nil, **_)
         booleans = [false, true]
+
+        all_services = []
+
+        # if launchctl item contains a wildcard, find matching process(es)
         services.each do |service|
+          all_services << service unless service.include?("*")
+          next unless service.include?("*")
+
+          found_services = find_launchctl_with_wildcard(service)
+          next if found_services.blank?
+
+          found_services.each { |found_service| all_services << found_service }
+        end
+
+        all_services.each do |service|
           ohai "Removing launchctl service #{service}"
           booleans.each do |with_sudo|
             plist_status = command.run(
@@ -106,7 +123,7 @@ module Cask
               +"/Library/LaunchAgents/#{service}.plist",
               +"/Library/LaunchDaemons/#{service}.plist",
             ]
-            paths.each { |elt| elt.prepend(ENV["HOME"]).freeze } unless with_sudo
+            paths.each { |elt| elt.prepend(Dir.home).freeze } unless with_sudo
             paths = paths.map { |elt| Pathname(elt) }.select(&:exist?)
             paths.each do |path|
               command.run!("/bin/rm", args: ["-f", "--", path], sudo: with_sudo)
@@ -131,6 +148,16 @@ module Cask
           end
       end
 
+      def find_launchctl_with_wildcard(search)
+        regex = Regexp.escape(search).gsub("\\*", ".*")
+        system_command!("/bin/launchctl", args: ["list"])
+          .stdout.lines.drop(1) # skip stdout column headers
+          .map do |line|
+            pid, _state, id = line.chomp.split(/\s+/)
+            id if pid.to_i.nonzero? && id.match?(regex)
+          end.compact
+      end
+
       sig { returns(String) }
       def automation_access_instructions
         <<~EOS
@@ -145,7 +172,7 @@ module Cask
         bundle_ids.each do |bundle_id|
           next unless running?(bundle_id)
 
-          unless User.current.gui?
+          unless T.must(User.current).gui?
             opoo "Not logged into a GUI; skipping quitting application ID '#{bundle_id}'."
             next
           end
@@ -307,7 +334,7 @@ module Cask
           return
         end
 
-        command.run(executable_path, script_arguments)
+        command.run(executable_path, **script_arguments)
         sleep 1
       end
 
@@ -409,7 +436,7 @@ module Cask
       end
 
       def recursive_rmdir(*directories, command: nil, **_)
-        success = true
+        success = T.let(true, T::Boolean)
         each_resolved_path(:rmdir, directories) do |_path, resolved_paths|
           resolved_paths.select(&method(:all_dirs?)).each do |resolved_path|
             puts resolved_path.sub(Dir.home, "~")
@@ -430,11 +457,11 @@ module Cask
         success
       end
 
-      def uninstall_rmdir(*args)
+      def uninstall_rmdir(*args, **kwargs)
         return if args.empty?
 
         ohai "Removing directories if empty:"
-        recursive_rmdir(*args)
+        recursive_rmdir(*args, **kwargs)
       end
     end
   end

@@ -18,9 +18,7 @@ module PyPI
   class Package
     extend T::Sig
 
-    attr_accessor :name
-    attr_accessor :extras
-    attr_accessor :version
+    attr_accessor :name, :extras, :version
 
     sig { params(package_string: String, is_url: T::Boolean).void }
     def initialize(package_string, is_url: false)
@@ -30,7 +28,7 @@ module PyPI
         match = if package_string.start_with?(PYTHONHOSTED_URL_PREFIX)
           File.basename(package_string).match(/^(.+)-([a-z\d.]+?)(?:.tar.gz|.zip)$/)
         end
-        raise ArgumentError, "package should be a valid PyPI URL" if match.blank?
+        raise ArgumentError, "Package should be a valid PyPI URL" if match.blank?
 
         @name = match[1]
         @version = match[2]
@@ -57,7 +55,7 @@ module PyPI
       else
         "https://pypi.org/pypi/#{@name}/json"
       end
-      out, _, status = curl_output metadata_url, "--location"
+      out, _, status = curl_output metadata_url, "--location", "--fail"
 
       return unless status.success?
 
@@ -198,7 +196,7 @@ module PyPI
 
       input_packages.each do |existing_package|
         if existing_package.same_package?(extra_package) && existing_package.version != extra_package.version
-          odie "Conflicting versions specified for the `#{extra_package.name}` package: "\
+          odie "Conflicting versions specified for the `#{extra_package.name}` package: " \
                "#{existing_package.version}, #{extra_package.version}"
         end
       end
@@ -220,9 +218,9 @@ module PyPI
     pipgrip_output = Utils.popen_read(*command)
     unless $CHILD_STATUS.success?
       odie <<~EOS
-        Unable to determine dependencies for \"#{input_packages.join(" ")}\" because of a failure when running
+        Unable to determine dependencies for "#{input_packages.join(" ")}" because of a failure when running
         `#{command.join(" ")}`.
-        Please update the resources for \"#{formula.name}\" manually.
+        Please update the resources for "#{formula.name}" manually.
       EOS
     end
 
@@ -242,8 +240,8 @@ module PyPI
         odie "Unable to resolve some dependencies. Please update the resources for \"#{formula.name}\" manually."
       elsif url.blank? || checksum.blank?
         odie <<~EOS
-          Unable to find the URL and/or sha256 for the \"#{name}\" resource.
-          Please update the resources for \"#{formula.name}\" manually.
+          Unable to find the URL and/or sha256 for the "#{name}" resource.
+          Please update the resources for "#{formula.name}" manually.
         EOS
       end
 

@@ -121,11 +121,11 @@ module Homebrew
       end
 
       def check_linuxbrew_core
-        return if Homebrew::EnvConfig.install_from_api?
+        return unless Homebrew::EnvConfig.no_install_from_api?
         return unless CoreTap.instance.linuxbrew_core?
 
         <<~EOS
-          Your Linux Homebrew/core repository is still linuxbrew-core.
+          Your Linux core repository is still linuxbrew-core.
           You must `brew update` to update to homebrew-core.
         EOS
       end
@@ -137,6 +137,35 @@ module Homebrew
           Your HOMEBREW_BOTTLE_DOMAIN still contains "linuxbrew".
           You must unset it (or adjust it to not contain linuxbrew
           e.g. by using homebrew instead).
+        EOS
+      end
+
+      def check_gcc_dependent_linkage
+        gcc_dependents = Formula.installed.select do |formula|
+          next false unless formula.tap&.core_tap?
+
+          # FIXME: This includes formulae that have no runtime dependency on GCC.
+          formula.recursive_dependencies.map(&:name).include? "gcc"
+        rescue TapFormulaUnavailableError
+          false
+        end
+        return if gcc_dependents.empty?
+
+        badly_linked = gcc_dependents.select do |dependent|
+          keg = Keg.new(dependent.prefix)
+          keg.binary_executable_or_library_files.any? do |binary|
+            paths = binary.rpaths
+            versioned_linkage = paths.any? { |path| path.match?(%r{lib/gcc/\d+$}) }
+            unversioned_linkage = paths.any? { |path| path.match?(%r{lib/gcc/current$}) }
+
+            versioned_linkage && !unversioned_linkage
+          end
+        end
+        return if badly_linked.empty?
+
+        inject_file_list badly_linked, <<~EOS
+          Formulae which link to GCC through a versioned path were found. These formulae
+          are prone to breaking when GCC is updated. You should `brew reinstall` these formulae:
         EOS
       end
     end
